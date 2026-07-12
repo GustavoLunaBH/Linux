@@ -1,0 +1,1098 @@
+#!/bin/bash
+# adserver_smart.sh
+# Script Inteligente para Samba AD - Multi-funcional
+# Versão: 3.0 - Com suporte a múltiplos serviços e diagnósticos
+
+set -e
+
+# Cores
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+NC='\033[0m'
+
+# Arquivos de estado
+STATE_FILE="/root/.ad_smart_state"
+NETWORK_STATE="/root/.network_smart_state"
+
+# Variáveis globais
+SCRIPT_VERSION="3.0"
+LOG_FILE="/var/log/ad_install.log"
+
+# ============================================
+# FUNÇÕES DE LOG E UTILITÁRIOS
+# ============================================
+log() {
+    echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1" | tee -a ${LOG_FILE}
+}
+
+error() {
+    echo -e "${RED}[ERRO]${NC} $1" | tee -a ${LOG_FILE}
+    exit 1
+}
+
+warning() {
+    echo -e "${YELLOW}[AVISO]${NC} $1" | tee -a ${LOG_FILE}
+}
+
+info() {
+    echo -e "${BLUE}[INFO]${NC} $1" | tee -a ${LOG_FILE}
+}
+
+success() {
+    echo -e "${GREEN}[SUCESSO]${NC} $1" | tee -a ${LOG_FILE}
+}
+
+header() {
+    echo -e "${CYAN}"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo "  $1"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo -e "${NC}"
+}
+
+calculate_cidr() {
+    local netmask=$1
+    case $netmask in
+        "255.255.255.255") echo "32" ;;
+        "255.255.255.254") echo "31" ;;
+        "255.255.255.252") echo "30" ;;
+        "255.255.255.248") echo "29" ;;
+        "255.255.255.240") echo "28" ;;
+        "255.255.255.224") echo "27" ;;
+        "255.255.255.192") echo "26" ;;
+        "255.255.255.128") echo "25" ;;
+        "255.255.255.0")   echo "24" ;;
+        "255.255.254.0")   echo "23" ;;
+        "255.255.252.0")   echo "22" ;;
+        "255.255.248.0")   echo "21" ;;
+        "255.255.240.0")   echo "20" ;;
+        "255.255.224.0")   echo "19" ;;
+        "255.255.192.0")   echo "18" ;;
+        "255.255.128.0")   echo "17" ;;
+        "255.255.0.0")     echo "16" ;;
+        "255.254.0.0")     echo "15" ;;
+        "255.252.0.0")     echo "14" ;;
+        "255.248.0.0")     echo "13" ;;
+        "255.240.0.0")     echo "12" ;;
+        "255.224.0.0")     echo "11" ;;
+        "255.192.0.0")     echo "10" ;;
+        "255.128.0.0")     echo "9" ;;
+        "255.0.0.0")       echo "8" ;;
+        *)                 echo "24" ;;
+    esac
+}
+
+# ============================================
+# FUNÇÕES DE SALVAMENTO DE ESTADO
+# ============================================
+save_state() {
+    cat > ${STATE_FILE} << EOF
+# Configuração do AD Smart
+ROLE='${ROLE}'
+STAGE='${STAGE}'
+HOSTNAME='${HOSTNAME}'
+DOMAIN='${DOMAIN}'
+REALM='${REALM}'
+SHORT_DOMAIN='${SHORT_DOMAIN}'
+ADMIN_PASSWORD='${ADMIN_PASSWORD}'
+PRIMARY_DC_IP='${PRIMARY_DC_IP}'
+PRIMARY_DC_HOSTNAME='${PRIMARY_DC_HOSTNAME}'
+JOINED='${JOINED:-false}'
+GATEWAY='${GATEWAY}'
+INSTALLED='${INSTALLED:-false}'
+INSTALL_DATE='$(date)'
+FS_TYPE='${FS_TYPE:-NONE}'
+EOF
+    log "Estado salvo em ${STATE_FILE}"
+}
+
+load_state() {
+    if [ -f "${STATE_FILE}" ]; then
+        source ${STATE_FILE}
+        return 0
+    fi
+    return 1
+}
+
+save_network_state() {
+    cat > ${NETWORK_STATE} << EOF
+IP='${IP}'
+INTERFACE='${INTERFACE}'
+DNS_FORWARDER='${DNS_FORWARDER}'
+NETMASK='${NETMASK}'
+GATEWAY='${GATEWAY}'
+CIDR='${CIDR}'
+EOF
+    log "Configuração de rede salva em ${NETWORK_STATE}"
+}
+
+load_network_state() {
+    if [ -f "${NETWORK_STATE}" ]; then
+        source ${NETWORK_STATE}
+        return 0
+    fi
+    return 1
+}
+
+# ============================================
+# FUNÇÃO DE DIAGNÓSTICO DO DOMÍNIO
+# ============================================
+diagnose_domain() {
+    header "DIAGNÓSTICO DO DOMÍNIO"
+    
+    echo -e "${YELLOW}Coletando informações do domínio...${NC}\n"
+    
+    # Verificar se está no domínio
+    echo -n "Status do domínio: "
+    if realm list 2>/dev/null | grep -q "domain-name"; then
+        echo -e "${GREEN}✓ Servidor está no domínio${NC}"
+        DOMAIN_INFO=$(realm list 2>/dev/null | grep -E "domain-name|realm-name")
+        echo "$DOMAIN_INFO"
+    else
+        echo -e "${RED}✗ Servidor NÃO está no domínio${NC}"
+    fi
+    echo ""
+    
+    # Verificar Samba
+    echo -n "Status do Samba AD: "
+    if systemctl is-active --quiet samba-ad-dc; then
+        echo -e "${GREEN}✓ Ativo${NC}"
+    else
+        echo -e "${RED}✗ Inativo${NC}"
+    fi
+    
+    # Verificar serviços
+    echo -e "\n${BLUE}Serviços:${NC}"
+    for service in samba-ad-dc smbd nmbd winbind; do
+        echo -n "  $service: "
+        if systemctl is-active --quiet $service 2>/dev/null; then
+            echo -e "${GREEN}✓ Ativo${NC}"
+        else
+            echo -e "${RED}✗ Inativo${NC}"
+        fi
+    done
+    
+    # Verificar portas
+    echo -e "\n${BLUE}Portas:${NC}"
+    for port in 53 88 135 389 445 464 636 3268 3269; do
+        echo -n "  Porta $port: "
+        if netstat -tlnp 2>/dev/null | grep -q ":$port "; then
+            echo -e "${GREEN}✓ Aberta${NC}"
+        else
+            echo -e "${RED}✗ Fechada${NC}"
+        fi
+    done
+    
+    # Verificar Kerberos
+    echo -e "\n${BLUE}Kerberos:${NC}"
+    if klist 2>/dev/null | grep -q "Ticket"; then
+        echo -e "${GREEN}✓ Tickets ativos:${NC}"
+        klist 2>/dev/null | head -5
+    else
+        echo -e "${YELLOW}⚠️  Nenhum ticket Kerberos ativo${NC}"
+    fi
+    
+    # Verificar nível funcional
+    echo -e "\n${BLUE}Nível Funcional do Domínio:${NC}"
+    if command -v samba-tool >/dev/null 2>&1; then
+        DOMAIN_LEVEL=$(samba-tool domain level show 2>/dev/null)
+        if [ ! -z "$DOMAIN_LEVEL" ]; then
+            echo "$DOMAIN_LEVEL"
+        else
+            echo -e "${YELLOW}⚠️  Não foi possível determinar${NC}"
+        fi
+    fi
+    
+    # Verificar replicação (se secundário)
+    if [ "${ROLE}" = "SECONDARY" ] && [ "${INSTALLED}" = "true" ]; then
+        echo -e "\n${BLUE}Replicação:${NC}"
+        samba-tool drs showrepl 2>/dev/null | head -20 || echo -e "${YELLOW}⚠️  Falha ao verificar replicação${NC}"
+    fi
+    
+    echo ""
+    read -p "Pressione Enter para continuar..."
+}
+
+# ============================================
+# FUNÇÃO DE ATUALIZAÇÃO DO DOMÍNIO
+# ============================================
+update_domain() {
+    header "ATUALIZAÇÃO DO DOMÍNIO"
+    
+    echo -e "${YELLOW}⚠️  ATENÇÃO: Atualizar o nível funcional é uma operação irreversível!${NC}"
+    echo ""
+    
+    # Verificar nível atual
+    echo -e "${BLUE}Nível funcional atual:${NC}"
+    samba-tool domain level show 2>/dev/null || echo -e "${RED}Não foi possível determinar${NC}"
+    echo ""
+    
+    echo -e "${YELLOW}Níveis disponíveis:${NC}"
+    echo "  2008_R2 - Windows Server 2008 R2"
+    echo "  2012     - Windows Server 2012"
+    echo "  2012_R2  - Windows Server 2012 R2"
+    echo "  2016     - Windows Server 2016"
+    echo "  2019     - Windows Server 2019"
+    echo "  2022     - Windows Server 2022 (recomendado)"
+    echo ""
+    
+    read -p "Digite o nível desejado (ex: 2022) ou 'cancel' para cancelar: " NEW_LEVEL
+    
+    if [ "$NEW_LEVEL" = "cancel" ]; then
+        echo -e "${YELLOW}Atualização cancelada.${NC}"
+        return 0
+    fi
+    
+    # Validar nível
+    VALID_LEVELS="2008_R2 2012 2012_R2 2016 2019 2022"
+    if ! echo "$VALID_LEVELS" | grep -q "$NEW_LEVEL"; then
+        echo -e "${RED}Nível inválido! Use: $VALID_LEVELS${NC}"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${RED}⚠️  ATENÇÃO: Esta operação é irreversível!${NC}"
+    echo -e "Confirme digitando 'SIM' para prosseguir:"
+    read -p "> " CONFIRM
+    
+    if [ "$CONFIRM" != "SIM" ]; then
+        echo -e "${YELLOW}Atualização cancelada.${NC}"
+        return 0
+    fi
+    
+    echo -e "\n${YELLOW}Atualizando nível funcional para $NEW_LEVEL...${NC}"
+    
+    # Verificar se é primário ou secundário
+    if [ "${ROLE}" = "SECONDARY" ]; then
+        echo -e "${YELLOW}⚠️  Execute esta operação no AD Primário!${NC}"
+        read -p "Deseja continuar mesmo assim? (s/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Ss]$ ]]; then
+            return 0
+        fi
+    fi
+    
+    # Executar atualização
+    if samba-tool domain level raise --level=$NEW_LEVEL 2>&1 | tee /tmp/domain_level_update.log; then
+        echo -e "${GREEN}✅ Domínio atualizado para nível $NEW_LEVEL com sucesso!${NC}"
+        echo -e "Log salvo em: /tmp/domain_level_update.log"
+    else
+        echo -e "${RED}❌ Falha ao atualizar o domínio!${NC}"
+        echo -e "Verifique o log: /tmp/domain_level_update.log"
+    fi
+    
+    echo ""
+    read -p "Pressione Enter para continuar..."
+}
+
+# ============================================
+# FUNÇÃO PARA INSTALAR FILE SERVER
+# ============================================
+install_file_server() {
+    header "INSTALAÇÃO DO FILE SERVER"
+    
+    if [ "${INSTALLED}" != "true" ]; then
+        echo -e "${RED}❌ O AD deve ser instalado primeiro!${NC}"
+        echo -e "${YELLOW}Instale o AD Primário ou Secundário antes de configurar o File Server.${NC}"
+        read -p "Pressione Enter para continuar..."
+        return 1
+    fi
+    
+    echo -e "${YELLOW}Configurando File Server integrado ao AD...${NC}\n"
+    
+    # Perguntar tipo de file server
+    echo -e "${BLUE}Tipo de File Server:${NC}"
+    echo "  1) Básico - Compartilhamento simples"
+    echo "  2) Avançado - Com quotas e auditoria"
+    echo "  3) Backup - Com snapshots e replicação"
+    echo ""
+    read -p "Escolha uma opção [1-3]: " FS_OPTION
+    
+    case $FS_OPTION in
+        1) FS_TYPE="BASIC" ;;
+        2) FS_TYPE="ADVANCED" ;;
+        3) FS_TYPE="BACKUP" ;;
+        *) FS_TYPE="BASIC" ;;
+    esac
+    
+    # Instalar pacotes
+    echo -e "\n${YELLOW}Instalando pacotes do File Server...${NC}"
+    apt update -qq 2>/dev/null || true
+    apt install -y -qq nfs-kernel-server nfs-common \
+        samba-client cifs-utils autofs \
+        quota quotatool \
+        rsync screen \
+        || warning "Alguns pacotes não puderam ser instalados"
+    
+    # Criar estrutura de diretórios
+    echo -e "\n${YELLOW}Configurando diretórios...${NC}"
+    mkdir -p /srv/samba/share
+    mkdir -p /srv/samba/profiles
+    mkdir -p /srv/samba/backup
+    
+    # Configurar permissões
+    chown -R root:root /srv/samba
+    chmod -R 755 /srv/samba
+    
+    # Configurar compartilhamentos no smb.conf
+    echo -e "\n${YELLOW}Configurando compartilhamentos...${NC}"
+    
+    cat >> /etc/samba/smb.conf << EOF_SMB_FS
+# ============================================
+# CONFIGURAÇÃO DO FILE SERVER
+# Tipo: ${FS_TYPE}
+# Data: $(date)
+# ============================================
+
+[share]
+    path = /srv/samba/share
+    read only = No
+    browseable = Yes
+    create mask = 0664
+    directory mask = 0775
+    valid users = @"Domain Users"
+    inherit permissions = Yes
+
+[profiles]
+    path = /srv/samba/profiles
+    read only = No
+    browseable = No
+    create mask = 0600
+    directory mask = 0700
+    valid users = @"Domain Users"
+    inherit permissions = Yes
+    profile acls = Yes
+
+[backup]
+    path = /srv/samba/backup
+    read only = No
+    browseable = Yes
+    create mask = 0664
+    directory mask = 0775
+    valid users = @"Domain Admins"
+    inherit permissions = Yes
+EOF_SMB_FS
+    
+    # Configurações específicas por tipo
+    case $FS_TYPE in
+        ADVANCED)
+            echo -e "\n${YELLOW}Configurando quotas...${NC}"
+            # Configurar quotas
+            mount -o remount,usrquota,grpquota / 2>/dev/null || true
+            quotacheck -avug 2>/dev/null || true
+            quotaon -avug 2>/dev/null || true
+            
+            # Adicionar quotas para usuários do domínio
+            cat >> /etc/samba/smb.conf << EOF_QUOTA
+    # Configurações de Quota
+    quota = yes
+    quota warn = 80
+    disk usage = yes
+EOF_QUOTA
+            ;;
+        BACKUP)
+            echo -e "\n${YELLOW}Configurando snapshots...${NC}"
+            # Criar script de backup
+            cat > /usr/local/bin/backup_samba.sh << 'EOF_BACKUP'
+#!/bin/bash
+BACKUP_DIR="/srv/samba/backup"
+DATE=$(date +%Y%m%d_%H%M%S)
+LOG="/var/log/samba_backup.log"
+
+echo "[$DATE] Iniciando backup..." >> $LOG
+
+# Backup dos compartilhamentos
+for share in share profiles; do
+    rsync -av --delete /srv/samba/$share/ $BACKUP_DIR/$share_$DATE/ >> $LOG 2>&1
+done
+
+# Manter apenas 7 dias de backups
+find $BACKUP_DIR -type d -name "*_*" -mtime +7 -exec rm -rf {} \; >> $LOG 2>&1
+
+echo "[$DATE] Backup concluído." >> $LOG
+EOF_BACKUP
+            chmod +x /usr/local/bin/backup_samba.sh
+            
+            # Adicionar ao crontab
+            (crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/backup_samba.sh") | crontab -
+            echo -e "${GREEN}✓ Backup agendado para 2h da manhã${NC}"
+            ;;
+    esac
+    
+    # Reiniciar Samba
+    systemctl restart samba-ad-dc
+    
+    echo -e "\n${GREEN}✅ File Server configurado com sucesso!${NC}"
+    echo ""
+    echo -e "${YELLOW}📌 Informações do File Server:${NC}"
+    echo -e "  Tipo: ${FS_TYPE}"
+    echo -e "  Compartilhamentos:"
+    echo -e "    - //${IP}/share  (usuários do domínio)"
+    echo -e "    - //${IP}/profiles (perfis de usuário)"
+    echo -e "    - //${IP}/backup (administradores)"
+    echo ""
+    echo -e "${YELLOW}📁 Diretórios:${NC}"
+    echo -e "  /srv/samba/share"
+    echo -e "  /srv/samba/profiles"
+    echo -e "  /srv/samba/backup"
+    echo ""
+    
+    FS_INSTALLED="true"
+    save_state
+    
+    read -p "Pressione Enter para continuar..."
+}
+
+# ============================================
+# FUNÇÃO PARA INSTALAR TERCEIRO AD
+# ============================================
+install_third_ad() {
+    header "INSTALAÇÃO DO TERCEIRO AD (Additional DC)"
+    
+    echo -e "${YELLOW}⚠️  Este servidor será configurado como um terceiro AD${NC}"
+    echo -e "${YELLOW}   ou um AD adicional em uma outra rede/domínio${NC}"
+    echo ""
+    
+    echo -e "${BLUE}Opções:${NC}"
+    echo "  1) Instalar como Terceiro AD do mesmo domínio"
+    echo "  2) Instalar como AD em outra rede (subdomínio)"
+    echo "  3) Instalar como AD de backup (replicação offline)"
+    echo ""
+    
+    read -p "Escolha uma opção [1-3]: " THIRD_OPTION
+    
+    case $THIRD_OPTION in
+        1)
+            echo -e "\n${YELLOW}Configurando como Terceiro AD do mesmo domínio...${NC}"
+            ROLE="THIRD_DC"
+            # Usar configurações existentes
+            if [ -z "${PRIMARY_DC_IP}" ]; then
+                read -p "Digite o IP do AD Primário: " PRIMARY_DC_IP
+                read -p "Digite o hostname do AD Primário: " PRIMARY_DC_HOSTNAME
+                read -p "Digite o domínio: " DOMAIN_INPUT
+                DOMAIN=$(echo $DOMAIN_INPUT | tr '[:lower:]' '[:upper:]')
+                REALM=$DOMAIN
+                SHORT_DOMAIN=$(echo $DOMAIN | cut -d. -f1)
+            fi
+            install_secondary_ad
+            ;;
+        2)
+            echo -e "\n${YELLOW}Configurando AD em outra rede (subdomínio)...${NC}"
+            echo -e "${BLUE}Exemplo: Se domínio é 'empresa.local', subdomínio seria 'filial.empresa.local'${NC}"
+            
+            read -p "Digite o nome do servidor: " HOSTNAME
+            read -p "Digite o domínio (ex: filial.empresa.local): " DOMAIN_INPUT
+            DOMAIN=$(echo $DOMAIN_INPUT | tr '[:lower:]' '[:upper:]')
+            REALM=$DOMAIN
+            SHORT_DOMAIN=$(echo $DOMAIN | cut -d. -f1)
+            
+            read -p "Digite o IP do AD Primário (domínio pai): " PRIMARY_DC_IP
+            read -p "Digite o hostname do AD Primário: " PRIMARY_DC_HOSTNAME
+            
+            # Configurar trust entre domínios
+            echo -e "\n${YELLOW}Configurando relação de confiança...${NC}"
+            
+            ROLE="SUB_DOMAIN"
+            save_state
+            
+            # Instalar como AD Secundário com subdomínio
+            install_secondary_ad
+            
+            echo -e "\n${GREEN}✅ Subdomínio configurado!${NC}"
+            echo -e "${YELLOW}Para configurar trust com domínio pai:${NC}"
+            echo "  samba-tool domain trust create ${PRIMARY_DC_HOSTNAME} --type=external"
+            ;;
+        3)
+            echo -e "\n${YELLOW}Configurando AD de Backup (replicação offline)...${NC}"
+            echo -e "${BLUE}Este servidor será um AD secundário com replicação programada.${NC}"
+            
+            ROLE="BACKUP_DC"
+            install_secondary_ad
+            
+            # Configurar replicação mais frequente
+            cat > /etc/cron.d/samba_replication_offline << EOF_CRON
+# Replicação a cada 5 minutos (para backup)
+*/5 * * * * root samba-tool drs replicate ${HOSTNAME} ${PRIMARY_DC_HOSTNAME} dc=${DOMAIN,,} > /dev/null 2>&1
+# Verificação de integridade a cada hora
+0 * * * * root samba-tool drs showrepl > /var/log/samba_replication.log 2>&1
+EOF_CRON
+            
+            echo -e "${GREEN}✅ Replicação configurada a cada 5 minutos!${NC}"
+            ;;
+        *)
+            echo -e "${RED}Opção inválida!${NC}"
+            return 1
+            ;;
+    esac
+    
+    read -p "Pressione Enter para continuar..."
+}
+
+# ============================================
+# FUNÇÃO PARA CONFIGURAR REDE
+# ============================================
+configure_static_ip() {
+    if is_network_configured; then
+        log "Rede já configurada com IP ${IP}"
+        echo -e "${GREEN}✓ Configuração de rede encontrada:${NC}"
+        echo -e "  IP: ${IP}"
+        echo -e "  Interface: ${INTERFACE}"
+        echo -e "  Gateway: ${GATEWAY}"
+        echo ""
+        read -p "Deseja usar esta configuração? (S/n): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Ss]$ ]] || [[ -z "$REPLY" ]]; then
+            export IP=$IP
+            export INTERFACE=$INTERFACE
+            export DNS_FORWARDER=$DNS_FORWARDER
+            export GATEWAY=$GATEWAY
+            return 0
+        fi
+    fi
+    
+    INTERFACE=$(ip link show | grep -E "^[0-9]+: (en|eth)" | head -1 | cut -d: -f2 | xargs)
+    if [ -z "$INTERFACE" ]; then
+        INTERFACE=$(ip link show | grep -E "^[0-9]+: " | grep -v lo | head -1 | cut -d: -f2 | xargs)
+    fi
+    
+    echo -e "\n${BLUE}═══════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}CONFIGURAÇÃO DE REDE${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════════════════════${NC}\n"
+    
+    echo -e "${YELLOW}Interface detectada:${NC} ${INTERFACE}"
+    CURRENT_IP=$(ip addr show $INTERFACE 2>/dev/null | grep inet | grep -v inet6 | awk '{print $2}' | cut -d/ -f1)
+    echo -e "${YELLOW}IP atual:${NC} ${CURRENT_IP:-Não detectado}\n"
+    
+    read -p "Digite o IP desejado: " IP_ADDR
+    read -p "Digite a máscara de rede (ex: 255.255.255.0): " NETMASK
+    CIDR=$(calculate_cidr "$NETMASK")
+    read -p "Digite o gateway: " GATEWAY
+    
+    export IP=$IP_ADDR
+    export INTERFACE=$INTERFACE
+    export GATEWAY=$GATEWAY
+    
+    save_network_state
+    
+    if [ "$CURRENT_IP" = "$IP_ADDR" ]; then
+        log "IP já está configurado."
+        return 0
+    fi
+    
+    NETPLAN_FILE=$(ls /etc/netplan/*.yaml 2>/dev/null | head -1)
+    if [ -z "$NETPLAN_FILE" ]; then
+        NETPLAN_FILE="/etc/netplan/01-netcfg.yaml"
+    fi
+    
+    cp $NETPLAN_FILE ${NETPLAN_FILE}.bak.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+    
+    cat > $NETPLAN_FILE << EOF_NETPLAN
+network:
+  version: 2
+  ethernets:
+    ${INTERFACE}:
+      dhcp4: false
+      addresses:
+        - ${IP_ADDR}/${CIDR}
+      routes:
+        - to: default
+          via: ${GATEWAY}
+      nameservers:
+        addresses:
+          - ${GATEWAY}
+          - 8.8.8.8
+          - 1.1.1.1
+EOF_NETPLAN
+    
+    netplan apply 2>&1 || warning "Falha ao aplicar Netplan"
+    save_network_state
+    
+    echo -e "\n${YELLOW}⚠️  IP alterado. Reinicie para continuar.${NC}"
+    read -p "Reiniciar agora? (S/n): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Ss]$ ]] || [[ -z "$REPLY" ]]; then
+        reboot
+    fi
+}
+
+# ============================================
+# FUNÇÃO PARA INSTALAR AD PRIMÁRIO
+# ============================================
+install_primary_ad() {
+    header "INSTALAÇÃO DO AD PRIMÁRIO"
+    
+    load_state
+    load_network_state
+    
+    if [ "${INSTALLED}" = "true" ]; then
+        echo -e "${GREEN}✅ AD Primário já está instalado!${NC}"
+        read -p "Pressione Enter para continuar..."
+        return 0
+    fi
+    
+    # Coletar informações
+    read -p "Digite o nome do servidor: " HOSTNAME
+    HOSTNAME=$(echo $HOSTNAME | tr '[:upper:]' '[:lower:]')
+    
+    read -p "Digite o domínio (ex: rnv.local): " DOMAIN_INPUT
+    DOMAIN=$(echo $DOMAIN_INPUT | tr '[:lower:]' '[:upper:]')
+    REALM=$DOMAIN
+    SHORT_DOMAIN=$(echo $DOMAIN | cut -d. -f1)
+    
+    # Coletar senha
+    collect_admin_password
+    
+    ROLE="PRIMARY"
+    save_state
+    
+    # Instalar
+    log "Instalando AD Primário..."
+    
+    apt update -qq 2>/dev/null || true
+    apt install -y -qq language-pack-pt locales samba \
+        samba-dsdb-modules samba-vfs-modules \
+        winbind libpam-winbind libnss-winbind \
+        kinit krb5-user dnsutils bind9utils \
+        ldap-utils chrony \
+        || error "Falha ao instalar pacotes"
+    
+    hostnamectl set-hostname ${HOSTNAME}.${DOMAIN,,}
+    
+    cat > /etc/hosts << EOF_HOSTS
+127.0.0.1 localhost
+127.0.1.1 ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
+${IP} ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
+EOF_HOSTS
+    
+    systemctl stop smbd nmbd winbind 2>/dev/null || true
+    systemctl disable smbd nmbd winbind 2>/dev/null || true
+    
+    rm -f /etc/samba/smb.conf
+    rm -rf /var/lib/samba/private 2>/dev/null || true
+    rm -rf /var/lib/samba/sysvol 2>/dev/null || true
+    
+    samba-tool domain provision \
+        --use-rfc2307 \
+        --realm=${REALM} \
+        --domain=${SHORT_DOMAIN} \
+        --server-role=dc \
+        --dns-backend=SAMBA_INTERNAL \
+        --adminpass=${ADMIN_PASSWORD} \
+        --host-ip=${IP} \
+        > /tmp/provision.log 2>&1 || error "Falha no provisionamento"
+    
+    if [ -f "/var/lib/samba/private/smb.conf" ]; then
+        cp /var/lib/samba/private/smb.conf /etc/samba/smb.conf
+    fi
+    
+    cat >> /etc/samba/smb.conf << EOF_SMBCONF
+    dns forwarder = ${GATEWAY}
+    log level = 2
+    max log size = 1000
+    debug timestamp = yes
+    ldap server require strong auth = no
+EOF_SMBCONF
+    
+    cat > /etc/krb5.conf << EOF_KRB5
+[libdefaults]
+    default_realm = ${REALM}
+    dns_lookup_realm = false
+    dns_lookup_kdc = true
+    ticket_lifetime = 24h
+    renew_lifetime = 7d
+    forwardable = true
+
+[realms]
+    ${REALM} = {
+        kdc = ${HOSTNAME}.${DOMAIN,,}
+        admin_server = ${HOSTNAME}.${DOMAIN,,}
+        default_domain = ${DOMAIN,,}
+    }
+
+[domain_realm]
+    .${DOMAIN,,} = ${REALM}
+    ${DOMAIN,,} = ${REALM}
+EOF_KRB5
+    
+    cat > /etc/resolv.conf << EOF_RESOLV
+nameserver 127.0.0.1
+search ${DOMAIN,,}
+domain ${DOMAIN,,}
+EOF_RESOLV
+    
+    systemctl unmask samba-ad-dc 2>/dev/null || true
+    systemctl enable samba-ad-dc 2>/dev/null || true
+    systemctl restart samba-ad-dc
+    
+    sleep 10
+    
+    INSTALLED="true"
+    save_state
+    
+    success "AD Primário instalado com sucesso!"
+    show_info
+}
+
+# ============================================
+# FUNÇÃO PARA INSTALAR AD SECUNDÁRIO
+# ============================================
+install_secondary_ad() {
+    header "INSTALAÇÃO DO AD SECUNDÁRIO"
+    
+    load_state
+    load_network_state
+    
+    if [ "${INSTALLED}" = "true" ]; then
+        echo -e "${GREEN}✅ AD Secundário já está instalado!${NC}"
+        read -p "Pressione Enter para continuar..."
+        return 0
+    fi
+    
+    # Coletar informações
+    read -p "Digite o nome do servidor: " HOSTNAME
+    HOSTNAME=$(echo $HOSTNAME | tr '[:upper:]' '[:lower:]')
+    
+    read -p "Digite o domínio (ex: rnv.local): " DOMAIN_INPUT
+    DOMAIN=$(echo $DOMAIN_INPUT | tr '[:lower:]' '[:upper:]')
+    REALM=$DOMAIN
+    SHORT_DOMAIN=$(echo $DOMAIN | cut -d. -f1)
+    
+    read -p "Digite o IP do AD Primário: " PRIMARY_DC_IP
+    read -p "Digite o hostname do AD Primário: " PRIMARY_DC_HOSTNAME
+    PRIMARY_DC_HOSTNAME=$(echo $PRIMARY_DC_HOSTNAME | tr '[:upper:]' '[:lower:]')
+    
+    # Coletar senha
+    collect_admin_password
+    
+    ROLE="SECONDARY"
+    save_state
+    
+    # Verificar conectividade
+    echo -n "Testando conexão com ${PRIMARY_DC_IP}... "
+    if ping -c 2 -W 2 ${PRIMARY_DC_IP} > /dev/null 2>&1; then
+        echo -e "${GREEN}✓ OK${NC}"
+    else
+        echo -e "${RED}✗ FALHOU${NC}"
+        warning "AD Primário não responde. Verifique a rede."
+        read -p "Continuar mesmo assim? (s/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Ss]$ ]]; then
+            return 1
+        fi
+    fi
+    
+    # Instalar
+    log "Instalando AD Secundário..."
+    
+    apt update -qq 2>/dev/null || true
+    apt install -y -qq language-pack-pt locales samba \
+        samba-dsdb-modules samba-vfs-modules \
+        winbind libpam-winbind libnss-winbind \
+        kinit krb5-user dnsutils bind9utils \
+        ldap-utils chrony \
+        || error "Falha ao instalar pacotes"
+    
+    hostnamectl set-hostname ${HOSTNAME}.${DOMAIN,,}
+    
+    cat > /etc/hosts << EOF_HOSTS
+127.0.0.1 localhost
+127.0.1.1 ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
+${IP} ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
+${PRIMARY_DC_IP} ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,} ${PRIMARY_DC_HOSTNAME}
+EOF_HOSTS
+    
+    cat > /etc/resolv.conf << EOF_RESOLV
+nameserver ${PRIMARY_DC_IP}
+nameserver ${GATEWAY}
+nameserver 8.8.8.8
+search ${DOMAIN,,}
+domain ${DOMAIN,,}
+EOF_RESOLV
+    
+    systemctl stop smbd nmbd winbind 2>/dev/null || true
+    systemctl disable smbd nmbd winbind 2>/dev/null || true
+    
+    rm -f /etc/samba/smb.conf
+    rm -rf /var/lib/samba/private 2>/dev/null || true
+    rm -rf /var/lib/samba/sysvol 2>/dev/null || true
+    
+    samba-tool domain join ${DOMAIN,,} DC \
+        -U "administrator@${REALM}" \
+        --password="${ADMIN_PASSWORD}" \
+        --dns-backend=SAMBA_INTERNAL \
+        > /tmp/join.log 2>&1 || error "Falha no join do domínio"
+    
+    if [ -f "/var/lib/samba/private/smb.conf" ]; then
+        cp /var/lib/samba/private/smb.conf /etc/samba/smb.conf
+    fi
+    
+    cat >> /etc/samba/smb.conf << EOF_SMBCONF
+    dns forwarder = ${PRIMARY_DC_IP}
+    log level = 2
+    max log size = 1000
+    debug timestamp = yes
+    ldap server require strong auth = no
+EOF_SMBCONF
+    
+    cat > /etc/krb5.conf << EOF_KRB5
+[libdefaults]
+    default_realm = ${REALM}
+    dns_lookup_realm = false
+    dns_lookup_kdc = true
+    ticket_lifetime = 24h
+    renew_lifetime = 7d
+    forwardable = true
+
+[realms]
+    ${REALM} = {
+        kdc = ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,}
+        admin_server = ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,}
+        default_domain = ${DOMAIN,,}
+    }
+
+[domain_realm]
+    .${DOMAIN,,} = ${REALM}
+    ${DOMAIN,,} = ${REALM}
+EOF_KRB5
+    
+    cat > /etc/resolv.conf << EOF_RESOLV_FINAL
+nameserver 127.0.0.1
+nameserver ${PRIMARY_DC_IP}
+search ${DOMAIN,,}
+domain ${DOMAIN,,}
+EOF_RESOLV_FINAL
+    
+    systemctl unmask samba-ad-dc 2>/dev/null || true
+    systemctl enable samba-ad-dc 2>/dev/null || true
+    systemctl restart samba-ad-dc
+    
+    sleep 10
+    
+    # Configurar replicação
+    cat > /etc/cron.d/samba_replication << EOF_CRON
+# Replicação a cada 15 minutos
+*/15 * * * * root samba-tool drs replicate ${HOSTNAME} ${PRIMARY_DC_HOSTNAME} dc=${DOMAIN,,} > /dev/null 2>&1
+EOF_CRON
+    
+    INSTALLED="true"
+    JOINED="true"
+    save_state
+    
+    success "AD Secundário instalado com sucesso!"
+    show_info
+}
+
+# ============================================
+# FUNÇÃO PARA COLETAR SENHA
+# ============================================
+collect_admin_password() {
+    if load_state && [ ! -z "${ADMIN_PASSWORD}" ]; then
+        return 0
+    fi
+    
+    echo -e "\n${BLUE}═══════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}SENHA DO ADMINISTRADOR${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════════════════════${NC}\n"
+    
+    while true; do
+        read -s -p "Senha: " ADMIN_PASSWORD
+        echo ""
+        read -s -p "Confirme: " ADMIN_PASSWORD_CONFIRM
+        echo ""
+        
+        if [ "$ADMIN_PASSWORD" = "$ADMIN_PASSWORD_CONFIRM" ]; then
+            if [ ${#ADMIN_PASSWORD} -lt 8 ]; then
+                echo -e "${RED}A senha deve ter pelo menos 8 caracteres!${NC}"
+                continue
+            fi
+            break
+        else
+            echo -e "${RED}As senhas não coincidem!${NC}"
+        fi
+    done
+    
+    echo -e "${GREEN}✓ Senha definida!${NC}"
+    save_state
+}
+
+# ============================================
+# FUNÇÃO PARA EXIBIR INFORMAÇÕES
+# ============================================
+show_info() {
+    header "INFORMAÇÕES DO SERVIDOR"
+    
+    echo -e "${YELLOW}📌 Configurações:${NC}"
+    echo -e "  Tipo: ${BLUE}${ROLE:-NÃO DEFINIDO}${NC}"
+    echo -e "  Servidor: ${BLUE}${HOSTNAME}${NC}"
+    echo -e "  Domínio: ${BLUE}${DOMAIN}${NC}"
+    echo -e "  IP: ${BLUE}${IP}${NC}"
+    echo -e "  Gateway: ${BLUE}${GATEWAY}${NC}"
+    echo ""
+    
+    if [ "${ROLE}" = "SECONDARY" ] || [ "${ROLE}" = "THIRD_DC" ]; then
+        echo -e "  AD Primário: ${BLUE}${PRIMARY_DC_HOSTNAME} (${PRIMARY_DC_IP})${NC}"
+        echo ""
+        echo -e "${YELLOW}📌 Replicação:${NC}"
+        echo -e "  Agendada a cada 15 minutos"
+        echo "  Comando manual: samba-tool drs replicate ${HOSTNAME} ${PRIMARY_DC_HOSTNAME} dc=${DOMAIN,,}"
+    fi
+    
+    echo -e "\n${YELLOW}📌 Usuário Administrador:${NC}"
+    echo -e "  administrator@${REALM}"
+    echo -e "  Senha: ${ADMIN_PASSWORD}"
+    echo ""
+    
+    echo -e "${YELLOW}📌 Arquivo de informações:${NC}"
+    echo -e "  /root/ad_info.txt"
+    echo ""
+}
+
+# ============================================
+# FUNÇÃO DE CONFIGURAÇÃO RÁPIDA
+# ============================================
+quick_config() {
+    header "CONFIGURAÇÃO RÁPIDA"
+    
+    echo -e "${YELLOW}Esta opção configura rapidamente o servidor${NC}"
+    echo -e "${YELLOW}com base nas respostas anteriores.${NC}\n"
+    
+    if ! load_state || [ -z "${ROLE}" ]; then
+        echo -e "${RED}❌ Nenhuma configuração anterior encontrada.${NC}"
+        echo -e "Execute a instalação completa primeiro."
+        read -p "Pressione Enter para continuar..."
+        return 1
+    fi
+    
+    if [ "${INSTALLED}" = "true" ]; then
+        echo -e "${GREEN}✅ Servidor já está instalado.${NC}"
+        show_info
+        read -p "Pressione Enter para continuar..."
+        return 0
+    fi
+    
+    echo -e "Instalando ${ROLE} com as configurações salvas...\n"
+    
+    case $ROLE in
+        PRIMARY) install_primary_ad ;;
+        SECONDARY|THIRD_DC|SUB_DOMAIN|BACKUP_DC) install_secondary_ad ;;
+        *) echo -e "${RED}❌ Tipo desconhecido: $ROLE${NC}" ;;
+    esac
+}
+
+# ============================================
+# MENU PRINCIPAL
+# ============================================
+show_menu() {
+    clear
+    echo -e "${CYAN}"
+    echo "╔═══════════════════════════════════════════════════════════════╗"
+    echo "║                                                               ║"
+    echo "║   SAMBA AD SERVER - SCRIPT INTELIGENTE v${SCRIPT_VERSION}                  ║"
+    echo "║                                                               ║"
+    echo "║   Multi-funcional com suporte a:                             ║"
+    echo "║   • AD Primário, Secundário e Terceiro DC                    ║"
+    echo "║   • File Server com quotas e backup                          ║"
+    echo "║   • Diagnóstico e atualização de domínio                     ║"
+    echo "║                                                               ║"
+    echo "╚═══════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    echo -e "${GREEN}OPÇÕES PRINCIPAIS:${NC}"
+    echo "  1) AD Primário - Novo domínio"
+    echo "  2) AD Secundário - Unir a domínio existente"
+    echo "  3) AD Terceiro/Adicional - Outro DC ou subdomínio"
+    echo ""
+    
+    echo -e "${YELLOW}OPÇÕES ADICIONAIS:${NC}"
+    echo "  4) File Server - Compartilhamentos integrados ao AD"
+    echo "  5) Diagnóstico do Domínio - Verificar status"
+    echo "  6) Atualizar Nível Funcional do Domínio"
+    echo ""
+    
+    echo -e "${BLUE}UTILITÁRIOS:${NC}"
+    echo "  7) Configuração Rápida - Usar configurações salvas"
+    echo "  8) Configurar Rede - Alterar IP fixo"
+    echo "  9) Resetar Configurações - Limpar tudo"
+    echo "  0) Sair"
+    echo ""
+    
+    echo -e "${WHITE}Status: ${NC}"
+    if load_state 2>/dev/null && [ "${INSTALLED}" = "true" ]; then
+        echo -e "  ${GREEN}✅ ${ROLE} instalado em ${INSTALL_DATE:-data desconhecida}${NC}"
+    elif load_state 2>/dev/null; then
+        echo -e "  ${YELLOW}⏳ Configuração em andamento (${ROLE:-não definido})${NC}"
+    else
+        echo -e "  ${RED}❌ Nenhuma configuração encontrada${NC}"
+    fi
+    echo ""
+    
+    read -p "Escolha uma opção [0-9]: " MENU_OPTION
+    echo ""
+    
+    case $MENU_OPTION in
+        0) echo -e "${GREEN}Saindo...${NC}"; exit 0 ;;
+        1) ROLE="PRIMARY"; install_primary_ad ;;
+        2) ROLE="SECONDARY"; install_secondary_ad ;;
+        3) install_third_ad ;;
+        4) install_file_server ;;
+        5) diagnose_domain ;;
+        6) update_domain ;;
+        7) quick_config ;;
+        8) configure_static_ip ;;
+        9) rm -f ${STATE_FILE} ${NETWORK_STATE}; success "Configurações resetadas!"; sleep 2 ;;
+        *) echo -e "${RED}Opção inválida!${NC}"; sleep 2 ;;
+    esac
+    
+    show_menu
+}
+
+# ============================================
+# VERIFICAR ARGUMENTOS DE LINHA DE COMANDO
+# ============================================
+case "$1" in
+    --diagnose)
+        diagnose_domain
+        exit 0
+        ;;
+    --update)
+        update_domain
+        exit 0
+        ;;
+    --fileserver)
+        install_file_server
+        exit 0
+        ;;
+    --quick)
+        quick_config
+        exit 0
+        ;;
+    --reset)
+        rm -f ${STATE_FILE} ${NETWORK_STATE}
+        echo -e "${GREEN}Configurações resetadas!${NC}"
+        exit 0
+        ;;
+    --help|-h)
+        echo "SAMBA AD SERVER - SCRIPT INTELIGENTE v${SCRIPT_VERSION}"
+        echo ""
+        echo "Uso: $0 [OPÇÃO]"
+        echo ""
+        echo "Opções:"
+        echo "  --diagnose    Executa diagnóstico do domínio"
+        echo "  --update      Atualiza nível funcional do domínio"
+        echo "  --fileserver  Configura File Server"
+        echo "  --quick       Configuração rápida com dados salvos"
+        echo "  --reset       Resetar todas as configurações"
+        echo "  --help, -h    Mostrar esta ajuda"
+        echo ""
+        echo "Executar sem opções para abrir o menu interativo."
+        exit 0
+        ;;
+    *)
+        show_menu
+        ;;
+esac
