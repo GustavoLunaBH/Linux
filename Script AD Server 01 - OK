@@ -1,0 +1,610 @@
+#!/bin/bash
+# adserver01_complete.sh
+# Script completo para configuração do Samba AD
+# Versão: 3.5 - Corrigido pacote de idioma
+
+set -e  # Para o script em caso de erro
+
+# Cores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Configurações
+DOMAIN="RNV.LOCAL"
+REALM="RNV.LOCAL"
+SHORT_DOMAIN="RNV"
+HOSTNAME="adserver01"
+DNS_FORWARDER="8.8.8.8"
+
+# ============================================
+# FUNÇÕES
+# ============================================
+log() {
+    echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1"
+}
+
+error() {
+    echo -e "${RED}[ERRO]${NC} $1"
+    exit 1
+}
+
+warning() {
+    echo -e "${YELLOW}[AVISO]${NC} $1"
+}
+
+info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+debug() {
+    echo -e "${BLUE}[DEBUG]${NC} $1"
+}
+
+check_success() {
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✓ OK${NC}"
+    else
+        echo -e "${RED}✗ FALHOU${NC}"
+        warning "Continuando mesmo com falha..."
+    fi
+}
+
+# Verificar se é root
+if [[ $EUID -ne 0 ]]; then
+   error "Este script deve ser executado como root (sudo)"
+fi
+
+# ============================================
+# CONFIGURAR LOCALE PT-BR
+# ============================================
+log "0. Configurando idioma Português Brasil..."
+
+# Atualizar lista de pacotes
+apt update -qq
+
+# Instalar pacotes de idioma (versão correta para Ubuntu 24.04)
+apt install -y -qq language-pack-pt locales
+
+# Gerar locale pt_BR
+locale-gen pt_BR.UTF-8
+
+# Configurar locale no sistema
+update-locale LANG=pt_BR.UTF-8 LANGUAGE=pt_BR:pt LC_ALL=pt_BR.UTF-8
+
+# Aplicar configuração
+export LANG=pt_BR.UTF-8
+export LANGUAGE=pt_BR:pt
+export LC_ALL=pt_BR.UTF-8
+
+echo -e "${GREEN}✓ Idioma Português Brasil configurado${NC}"
+echo ""
+
+# ============================================
+# ATIVAR AUTO COMPLETE COM TAB
+# ============================================
+log "0. Ativando auto complete com TAB..."
+
+# Instalar bash-completion
+apt install -y -qq bash-completion
+
+# Configurar bashrc para auto complete
+if ! grep -q "bash-completion" /root/.bashrc; then
+    cat >> /root/.bashrc << 'EOF'
+
+# Ativar auto complete com TAB
+if [ -f /etc/bash_completion ]; then
+    . /etc/bash_completion
+fi
+
+# Ativar auto complete para samba-tool
+complete -C samba-tool samba-tool
+EOF
+fi
+
+# Ativar para o usuário atual
+if [ -f /etc/bash_completion ]; then
+    . /etc/bash_completion
+fi
+
+echo -e "${GREEN}✓ Auto complete com TAB ativado${NC}"
+echo ""
+
+# ============================================
+# DETECTAR INTERFACE DE REDE
+# ============================================
+log "0. Detectando interface de rede..."
+
+# Descobrir interface de rede
+INTERFACE=$(ip link show | grep -E "^[0-9]+: (en|eth)" | head -1 | cut -d: -f2 | xargs)
+if [ -z "$INTERFACE" ]; then
+    INTERFACE=$(ip link show | grep -E "^[0-9]+: " | grep -v lo | head -1 | cut -d: -f2 | xargs)
+fi
+
+# Obter IP da interface
+IP_ADDR=$(ip addr show $INTERFACE 2>/dev/null | grep inet | grep -v inet6 | awk '{print $2}' | cut -d/ -f1)
+
+# Se não conseguir o IP, usar o configurado
+if [ -z "$IP_ADDR" ]; then
+    IP_ADDR="192.168.1.2"
+fi
+
+# Usar o IP detectado
+IP="$IP_ADDR"
+
+echo -e "${GREEN}✓ Interface detectada: ${INTERFACE} (${IP})${NC}"
+echo ""
+
+# ============================================
+# SOLICITAR SENHA DO ADMINISTRADOR
+# ============================================
+clear
+echo -e "${BLUE}"
+echo "╔═══════════════════════════════════════════════════════════════╗"
+echo "║                                                               ║"
+echo "║     SAMBA AD SERVER - INSTALAÇÃO COMPLETA                    ║"
+echo "║     Domínio: ${DOMAIN}                                        ║"
+echo "║     Servidor: ${HOSTNAME}                                    ║"
+echo "║     Interface: ${INTERFACE} (${IP})                          ║"
+echo "║                                                               ║"
+echo "╚═══════════════════════════════════════════════════════════════╝"
+echo -e "${NC}"
+
+log "=== INICIANDO CONFIGURAÇÃO DO AD SERVER PRIMÁRIO ==="
+info "Interface detectada: ${INTERFACE}"
+info "IP detectado: ${IP}"
+echo ""
+
+# Solicitar senha do Administrador
+echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════${NC}"
+echo -e "${BLUE}Configuração da senha do Administrador do Domínio${NC}"
+echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════${NC}"
+echo ""
+
+# Pedir a senha com confirmação
+while true; do
+    echo -e "${BLUE}Digite a senha do administrador:${NC}"
+    read -s -p "> " ADMIN_PASSWORD
+    echo ""
+    
+    echo -e "${BLUE}Confirme a senha:${NC}"
+    read -s -p "> " ADMIN_PASSWORD_CONFIRM
+    echo ""
+    
+    if [ "$ADMIN_PASSWORD" = "$ADMIN_PASSWORD_CONFIRM" ]; then
+        # Verificar se a senha tem requisitos mínimos
+        if [ ${#ADMIN_PASSWORD} -lt 8 ]; then
+            echo -e "${RED}A senha deve ter pelo menos 8 caracteres!${NC}"
+            echo ""
+            continue
+        fi
+        
+        if ! echo "$ADMIN_PASSWORD" | grep -q "[A-Z]"; then
+            echo -e "${RED}A senha deve ter pelo menos uma letra maiúscula!${NC}"
+            echo ""
+            continue
+        fi
+        
+        if ! echo "$ADMIN_PASSWORD" | grep -q "[a-z]"; then
+            echo -e "${RED}A senha deve ter pelo menos uma letra minúscula!${NC}"
+            echo ""
+            continue
+        fi
+        
+        if ! echo "$ADMIN_PASSWORD" | grep -q "[0-9]"; then
+            echo -e "${RED}A senha deve ter pelo menos um número!${NC}"
+            echo ""
+            continue
+        fi
+        
+        break
+    else
+        echo -e "${RED}As senhas não coincidem! Tente novamente.${NC}"
+        echo ""
+    fi
+done
+
+echo ""
+echo -e "${GREEN}✓ Senha definida com sucesso!${NC}"
+echo ""
+
+# Perguntar se deseja continuar
+read -p "Deseja continuar com a instalação? (S/n): " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Ss]$ ]] && [[ ! -z "$REPLY" ]]; then
+    error "Instalação cancelada pelo usuário"
+fi
+
+# ============================================
+# INÍCIO DA INSTALAÇÃO
+# ============================================
+
+# 1. Configurar hostname
+log "1. Configurando hostname..."
+hostnamectl set-hostname ${HOSTNAME}.${DOMAIN,,}
+check_success
+
+# 2. Configurar /etc/hosts
+log "2. Configurando /etc/hosts..."
+if [ -f /etc/hosts ]; then
+    cp /etc/hosts /etc/hosts.bak.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+fi
+
+cat > /etc/hosts << EOF
+127.0.0.1 localhost
+127.0.1.1 ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
+${IP} ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
+192.168.1.3 adserver02.${DOMAIN,,} adserver02
+192.168.1.10 fileserver01.${DOMAIN,,} fileserver01
+EOF
+check_success
+
+# 3. Configurar NTP
+log "3. Instalando e configurando NTP..."
+apt update -qq
+apt install chrony -y -qq
+timedatectl set-timezone America/Sao_Paulo
+systemctl enable --now chrony -qq
+check_success
+
+# 4. Instalar pacotes do Samba
+log "4. Instalando pacotes do Samba AD..."
+DEBIAN_FRONTEND=noninteractive apt install -y -qq \
+    acl attr samba samba-dsdb-modules \
+    samba-vfs-modules winbind libpam-winbind \
+    libnss-winbind kinit krb5-user dnsutils \
+    bind9utils ldap-utils \
+    bash-completion \
+    language-pack-pt \
+    locales
+check_success
+
+# 5. Parar serviços conflitantes
+log "5. Parando serviços conflitantes..."
+systemctl stop smbd nmbd winbind 2>/dev/null || true
+systemctl disable smbd nmbd winbind 2>/dev/null || true
+check_success
+
+# 6. Limpar configurações antigas
+log "6. Limpando configurações antigas..."
+rm -f /etc/samba/smb.conf
+rm -rf /var/lib/samba/private 2>/dev/null || true
+rm -rf /var/lib/samba/sysvol 2>/dev/null || true
+rm -f /etc/krb5.conf
+check_success
+
+# 7. Provisionar o domínio
+log "7. Provisionando o domínio ${DOMAIN}..."
+info "Isso pode levar alguns minutos..."
+
+# Executar provisionamento com a interface correta
+samba-tool domain provision \
+    --use-rfc2307 \
+    --realm=${REALM} \
+    --domain=${SHORT_DOMAIN} \
+    --server-role=dc \
+    --dns-backend=SAMBA_INTERNAL \
+    --adminpass=${ADMIN_PASSWORD} \
+    --host-ip=${IP} \
+    --option="interfaces=lo ${INTERFACE}" \
+    --option="bind interfaces only=yes" \
+    > /tmp/provision.log 2>&1
+
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓ OK${NC}"
+else
+    echo -e "${RED}✗ FALHOU${NC}"
+    warning "Tentando provisionamento sem opções extras..."
+    
+    # Tentar sem opções extras
+    samba-tool domain provision \
+        --use-rfc2307 \
+        --realm=${REALM} \
+        --domain=${SHORT_DOMAIN} \
+        --server-role=dc \
+        --dns-backend=SAMBA_INTERNAL \
+        --adminpass=${ADMIN_PASSWORD} \
+        > /tmp/provision.log 2>&1
+    
+    check_success
+fi
+
+# 8. Criar arquivo smb.conf
+log "8. Configurando smb.conf..."
+
+if [ -f "/var/lib/samba/private/smb.conf" ]; then
+    cp /var/lib/samba/private/smb.conf /etc/samba/smb.conf
+    info "Arquivo copiado de /var/lib/samba/private/"
+else
+    info "Criando smb.conf manualmente..."
+    cat > /etc/samba/smb.conf << EOF
+[global]
+    netbios name = ${HOSTNAME^^}
+    realm = ${REALM}
+    server role = active directory domain controller
+    workgroup = ${SHORT_DOMAIN}
+    dns forwarder = ${DNS_FORWARDER}
+    interfaces = lo ${INTERFACE}
+    bind interfaces only = yes
+    log level = 2
+    max log size = 1000
+    debug timestamp = yes
+    ldap server require strong auth = no
+    server services = s3fs, rpc, nbt, wrepl, ldap, cldap, kdc, drepl, winbind, ntp_signd, kcc, dnsupdate, dns
+EOF
+fi
+
+# Garantir que a interface correta esteja configurada
+if ! grep -q "interfaces.*${INTERFACE}" /etc/samba/smb.conf; then
+    sed -i "s/interfaces.*=.*/interfaces = lo ${INTERFACE}/g" /etc/samba/smb.conf
+fi
+
+if ! grep -q "dns forwarder" /etc/samba/smb.conf; then
+    echo "    dns forwarder = ${DNS_FORWARDER}" >> /etc/samba/smb.conf
+fi
+
+check_success
+
+# 9. Configurar Kerberos
+log "9. Configurando Kerberos..."
+
+# Remover configuração antiga
+rm -f /etc/krb5.conf
+rm -f /var/lib/samba/private/krb5.conf
+
+# Criar configuração COMPLETA do Kerberos
+cat > /etc/krb5.conf << EOF
+[libdefaults]
+    default_realm = ${REALM}
+    dns_lookup_realm = false
+    dns_lookup_kdc = true
+    ticket_lifetime = 24h
+    renew_lifetime = 7d
+    forwardable = true
+
+[realms]
+    ${REALM} = {
+        kdc = ${HOSTNAME}.${DOMAIN,,}
+        admin_server = ${HOSTNAME}.${DOMAIN,,}
+        default_domain = ${DOMAIN,,}
+    }
+
+[domain_realm]
+    .${DOMAIN,,} = ${REALM}
+    ${DOMAIN,,} = ${REALM}
+    ${HOSTNAME} = ${REALM}
+
+[logging]
+    kdc = FILE:/var/log/krb5kdc.log
+    admin_server = FILE:/var/log/kadmin.log
+    default = FILE:/var/log/krb5lib.log
+EOF
+
+# Copiar para o private
+cp /etc/krb5.conf /var/lib/samba/private/krb5.conf
+check_success
+
+# 10. Configurar resolv.conf
+log "10. Configurando resolução DNS..."
+
+if lsattr /etc/resolv.conf 2>/dev/null | grep -q "i"; then
+    info "Removendo atributo imutável do /etc/resolv.conf..."
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+fi
+
+if [ -f /etc/resolv.conf ]; then
+    cp /etc/resolv.conf /etc/resolv.conf.bak.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+fi
+
+cat > /etc/resolv.conf << EOF
+nameserver 127.0.0.1
+search ${DOMAIN,,}
+domain ${DOMAIN,,}
+EOF
+
+info "Arquivo /etc/resolv.conf atualizado"
+check_success
+
+# 11. Iniciar serviços
+log "11. Iniciando serviços do Samba AD..."
+systemctl unmask samba-ad-dc 2>/dev/null || true
+systemctl enable samba-ad-dc 2>/dev/null || true
+systemctl restart samba-ad-dc
+check_success
+
+# 12. Aguardar serviços iniciarem
+log "12. Aguardando serviços iniciarem (30 segundos)..."
+sleep 30
+
+# 13. Verificar DNS
+log "13. Verificando DNS..."
+info "Testando resolução DNS..."
+
+sleep 5
+if host -t SRV _ldap._tcp.${DOMAIN,,} > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ DNS SRV OK${NC}"
+else
+    warning "DNS SRV não resolvido corretamente - pode levar mais tempo"
+    sleep 10
+    host -t SRV _ldap._tcp.${DOMAIN,,} || warning "DNS SRV ainda não disponível"
+fi
+
+if host -t A ${HOSTNAME}.${DOMAIN,,} > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ Hostname OK${NC}"
+else
+    warning "Hostname não resolvido - verificando..."
+    sleep 5
+    host -t A ${HOSTNAME}.${DOMAIN,,} || warning "Hostname ainda não disponível"
+fi
+
+# 14. Testar Kerberos
+log "14. Testando autenticação Kerberos..."
+echo "═══════════════════════════════════════════════════════════════════"
+debug "Iniciando teste de Kerberos..."
+debug "Domínio: ${REALM}"
+debug "Usuário: administrator@${REALM}"
+echo "═══════════════════════════════════════════════════════════════════"
+
+# Teste: Autenticação
+debug "Testando autenticação..."
+if echo "${ADMIN_PASSWORD}" | kinit administrator@${REALM} > /dev/null 2>&1; then
+    echo -e "${GREEN}✅ Kerberos funcionando!${NC}"
+    echo ""
+    echo -e "${BLUE}Ticket atual:${NC}"
+    klist
+    KERBEROS_OK=1
+else
+    echo -e "${RED}❌ Kerberos falhou${NC}"
+    KERBEROS_OK=0
+    debug "Tentando com mais detalhes..."
+    echo "${ADMIN_PASSWORD}" | kinit -V administrator@${REALM} 2>&1 || true
+fi
+
+echo "═══════════════════════════════════════════════════════════════════"
+
+# 15. Criar grupos
+log "15. Criando grupos padrão..."
+samba-tool group add "admins" --description="Administradores do Domínio" 2>/dev/null || warning "Grupo admins já existe"
+samba-tool group add "users" --description="Usuários do Domínio" 2>/dev/null || warning "Grupo users já existe"
+echo -e "${GREEN}✓ Grupos criados${NC}"
+
+# 16. Criar usuário secundário
+log "16. Criando usuário admin2..."
+samba-tool user create admin2 ${ADMIN_PASSWORD} --given-name="Admin" --surname="Secundario" 2>/dev/null || warning "Usuário admin2 já existe"
+samba-tool group addmembers "Domain Admins" admin2 2>/dev/null || warning "Não foi possível adicionar admin2 ao grupo Domain Admins"
+echo -e "${GREEN}✓ Usuário admin2 criado${NC}"
+
+# 17. Verificar status do serviço
+log "17. Verificando status do serviço..."
+systemctl status samba-ad-dc --no-pager | grep -E "Active:|Loaded:" || warning "Serviço não está ativo"
+
+# 18. Salvar informações
+log "18. Salvando informações de configuração..."
+cat > /root/ad_info.txt << EOF
+═══════════════════════════════════════════════════════════════════
+                    INFORMAÇÕES DO DOMÍNIO
+═══════════════════════════════════════════════════════════════════
+
+DOMÍNIO: ${DOMAIN}
+REALM: ${REALM}
+IP: ${IP}
+SERVIDOR: ${HOSTNAME}
+INTERFACE: ${INTERFACE}
+DATA CRIAÇÃO: $(date)
+
+───────────────────────────────────────────────────────────────────
+USUÁRIOS E SENHAS
+───────────────────────────────────────────────────────────────────
+Administrador: administrator@${REALM}
+Senha: ${ADMIN_PASSWORD}
+
+Usuário Secundário: admin2@${REALM}
+Senha: ${ADMIN_PASSWORD}
+
+⚠️  IMPORTANTE: Guarde estas senhas em local seguro!
+
+───────────────────────────────────────────────────────────────────
+RESULTADO DO TESTE KERBEROS
+───────────────────────────────────────────────────────────────────
+$(klist 2>&1 || echo "Sem ticket ativo")
+
+───────────────────────────────────────────────────────────────────
+COMANDOS ÚTEIS
+───────────────────────────────────────────────────────────────────
+# Testar Kerberos
+echo '${ADMIN_PASSWORD}' | kinit administrator@${REALM}
+
+# Verificar ticket
+klist
+
+# Listar usuários
+samba-tool user list
+
+# Listar grupos
+samba-tool group list
+
+# Testar DNS
+host -t SRV _ldap._tcp.${DOMAIN,,}
+host -t A ${HOSTNAME}.${DOMAIN,,}
+
+# Verificar configuração
+cat /etc/samba/smb.conf | grep "dns forwarder"
+cat /etc/samba/smb.conf | grep "interfaces"
+
+───────────────────────────────────────────────────────────────────
+LOGS
+───────────────────────────────────────────────────────────────────
+Arquivo de log: /tmp/provision.log
+Log do Samba: /var/log/samba/log.samba
+EOF
+
+check_success
+
+# 19. Mostrar resumo final
+clear
+echo -e "${GREEN}"
+echo "═══════════════════════════════════════════════════════════════════"
+echo "                                                                   "
+echo "         ✅ CONFIGURAÇÃO CONCLUÍDA COM SUCESSO!                    "
+echo "                                                                   "
+echo "═══════════════════════════════════════════════════════════════════"
+echo -e "${NC}"
+echo ""
+echo -e "${BLUE}📋 RESUMO DA INSTALAÇÃO:${NC}"
+echo ""
+echo -e "  ${GREEN}✓${NC} Idioma Português Brasil configurado"
+echo -e "  ${GREEN}✓${NC} Auto complete com TAB ativado"
+echo -e "  ${GREEN}✓${NC} Hostname configurado: ${HOSTNAME}.${DOMAIN,,}"
+echo -e "  ${GREEN}✓${NC} Interface detectada: ${INTERFACE} (${IP})"
+echo -e "  ${GREEN}✓${NC} /etc/hosts configurado"
+echo -e "  ${GREEN}✓${NC} Samba AD provisionado"
+echo -e "  ${GREEN}✓${NC} Serviços iniciados"
+echo -e "  ${GREEN}✓${NC} DNS configurado"
+echo -e "  ${GREEN}✓${NC} Kerberos configurado"
+echo -e "  ${GREEN}✓${NC} Usuários criados"
+echo ""
+echo -e "${YELLOW}📌 INFORMAÇÕES DE ACESSO:${NC}"
+echo ""
+echo -e "  Domínio: ${BLUE}${DOMAIN}${NC}"
+echo -e "  Usuário Admin: ${BLUE}administrator@${REALM}${NC}"
+echo -e "  Senha Admin: ${BLUE}${ADMIN_PASSWORD}${NC}"
+echo -e "  IP do Servidor: ${BLUE}${IP}${NC}"
+echo -e "  Interface: ${BLUE}${INTERFACE}${NC}"
+echo ""
+echo -e "${YELLOW}📁 ARQUIVOS SALVOS:${NC}"
+echo ""
+echo -e "  /root/ad_info.txt - Informações completas"
+echo -e "  /tmp/provision.log - Log do provisionamento"
+echo ""
+echo -e "${YELLOW}🔧 TESTE MANUAL:${NC}"
+echo ""
+echo -e "  Para testar o Kerberos manualmente, execute:"
+echo -e "  ${BLUE}echo '${ADMIN_PASSWORD}' | kinit administrator@${REALM}${NC}"
+echo -e "  ${BLUE}klist${NC}"
+echo ""
+echo -e "${YELLOW}💡 DICAS:${NC}"
+echo -e "  ✅ Use TAB para auto completar comandos"
+echo -e "  ✅ O sistema está em Português Brasil"
+echo -e "  ✅ Para configurar o AD Server02, execute o script correspondente"
+echo ""
+echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}                    FIM DA INSTALAÇÃO                              ${NC}"
+echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${NC}"
+echo ""
+
+# Perguntar se deseja reiniciar
+read -p "Deseja reiniciar o servidor agora? (s/N): " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Ss]$ ]]; then
+    log "Reiniciando servidor em 5 segundos..."
+    sleep 5
+    reboot
+else
+    log "Lembre-se de reiniciar o servidor depois para aplicar todas as configurações."
+    log ""
+    log "Para testar manualmente:"
+    log "  echo '${ADMIN_PASSWORD}' | kinit administrator@${REALM}"
+    log "  klist"
+fi
