@@ -1,0 +1,21 @@
+1. Modifique o arquivo smb.confAbra o arquivo principal de configuração do Samba (geralmente localizado em /etc/samba/smb.conf) usando o editor de sua preferência (como nano ou vi):
+bashnano /etc/samba/smb.conf
+
+
+Dentro da seção [global], insira a seguinte linha:iniad dc functional level = 2016
+Use o código com cuidado.Salve e feche o arquivo.
+
+2. Reinicie os serviços do SambaPara carregar a nova configuração, reinicie o daemon responsável pelo Active Directory:
+bash
+systemctl restart samba-ad-dc
+
+Verifique a mudançaExecute novamente o comando de verificação para checar o campo Lowest function level of a DC:
+bash
+samba-tool domain level show
+
+ Execute a elevaçãoAgora que o "nível mais baixo do DC" foi atualizado, tente rodar os comandos de elevação novamente:bash
+samba-tool domain schemaupgrade --schema=2019
+samba-tool domain functionalprep --function-level=2016
+samba-tool domain level raise --domain-level=2016 --forest-level=2016
+
+Caso continue retornando erros após esses passos, me responda:O comando samba-tool domain level show mudou o valor da linha Lowest function level para 2016?Existe algum outro servidor/controlador de domínio secundário (Samba ou Windows Server legítimo) conectado nessa mesma rede?
