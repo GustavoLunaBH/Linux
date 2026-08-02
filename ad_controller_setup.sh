@@ -1,7 +1,7 @@
 #!/bin/bash
 # ad_controller_setup.sh
 # Script completo para instalação do Samba AD - Controlador de Domínio
-# Versão: 2.9 - Corrigido: Senha e funções
+# Versão: 3.0 - Com correções de rede e adição de equipamentos
 
 # ============================================
 # CORES PARA OUTPUT
@@ -23,7 +23,7 @@ DOMAIN="RNV.INTRA"
 REALM="RNV.INTRA"
 SHORT_DOMAIN="RNV"
 ADMIN_USER="administrator"
-ADMIN_PASSWORD=""          # Será preenchida durante a execução
+ADMIN_PASSWORD=""
 FIXED_IP=""
 FIXED_GATEWAY="192.168.1.1"
 INTERFACE=""
@@ -31,7 +31,7 @@ DNS_FORWARDER="8.8.8.8"
 NTP_SERVER="a.st1.ntp.br"
 PRIMARY_DC_IP="192.168.1.2"
 PRIMARY_DC_HOSTNAME="adserver01"
-SCRIPT_VERSION="2.9"
+SCRIPT_VERSION="3.0"
 LOG_FILE="/tmp/ad_setup_$(date +%Y%m%d_%H%M%S).log"
 INSTALLATION_TYPE=""
 HOSTNAME=""
@@ -89,18 +89,18 @@ get_os_info() {
 print_banner() {
     clear
     echo -e "${MAGENTA}"
-    echo "    ╔═════════════════════════════════════════════════════════════╗"
+    echo "    ╔══════════════════════════════════════════════════════════════╗"
     echo "    ║                                                              ║"
-    echo "    ║    █████╗ ██████╗      ███████╗███████╗████████╗██╗   ██╗    ║"
-    echo "    ║   ██╔══██╗██╔══██╗     ██╔════╝██╔════╝╚══██╔══╝██║   ██║    ║"
-    echo "    ║   ███████║██║  ██║     ███████╗█████╗     ██║   ██║   ██║    ║"
-    echo "    ║   ██╔══██║██║  ██║     ╚════██║██╔══╝     ██║   ██║   ██║    ║"
-    echo "    ║   ██║  ██║██████╔╝     ███████║███████╗   ██║   ╚██████╔╝    ║"
-    echo "    ║   ╚═╝  ╚═╝╚═════╝      ╚══════╝╚══════╝   ╚═╝    ╚═════╝     ║"
+    echo "    ║     █████╗ ██████╗      ███████╗███████╗████████╗██╗   ██╗  ║"
+    echo "    ║    ██╔══██╗██╔══██╗     ██╔════╝██╔════╝╚══██╔══╝██║   ██║  ║"
+    echo "    ║    ███████║██║  ██║     ███████╗█████╗     ██║   ██║   ██║  ║"
+    echo "    ║    ██╔══██║██║  ██║     ╚════██║██╔══╝     ██║   ██║   ██║  ║"
+    echo "    ║    ██║  ██║██████╔╝     ███████║███████╗   ██║   ╚██████╔╝  ║"
+    echo "    ║    ╚═╝  ╚═╝╚═════╝      ╚══════╝╚══════╝   ╚═╝    ╚═════╝   ║"
     echo "    ║                                                              ║"
-    echo "    ║          INSTALADOR DO CONTROLADOR DE DOMÍNIO                ║"
-    echo "    ║              Samba AD - Versão ${SCRIPT_VERSION}                           ║"
-    echo "    ╚═════════════════════════════════════════════════════════════╝"
+    echo "    ║           INSTALADOR DO CONTROLADOR DE DOMÍNIO               ║"
+    echo "    ║                  Samba AD - Versão ${SCRIPT_VERSION}                        ║"
+    echo "    ╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
 
@@ -151,6 +151,23 @@ detect_domain() {
 }
 
 detect_netplan_file() {
+    # Verificar qual arquivo está ativo (não desabilitado)
+    local active_file=""
+    
+    # Primeiro, verificar se existe algum arquivo .yaml que NÃO seja backup ou disabled
+    for file in /etc/netplan/*.yaml; do
+        if [ -f "$file" ] && [[ ! "$file" =~ \.backup\..*$ ]] && [[ ! "$file" =~ \.disabled\..*$ ]]; then
+            active_file="$file"
+            break
+        fi
+    done
+    
+    if [ -n "$active_file" ]; then
+        NETPLAN_FILE="$active_file"
+        return
+    fi
+    
+    # Se não encontrou arquivo ativo, verificar os padrões
     if [ -f "/etc/netplan/50-cloud-init.yaml" ]; then
         NETPLAN_FILE="/etc/netplan/50-cloud-init.yaml"
     elif [ -f "/etc/netplan/01-netcfg.yaml" ]; then
@@ -158,7 +175,7 @@ detect_netplan_file() {
     elif [ -f "/etc/netplan/00-installer-config.yaml" ]; then
         NETPLAN_FILE="/etc/netplan/00-installer-config.yaml"
     else
-        local existing_file=$(ls /etc/netplan/*.yaml 2>/dev/null | head -1)
+        local existing_file=$(ls /etc/netplan/*.yaml 2>/dev/null | grep -v "\.backup\." | grep -v "\.disabled\." | head -1)
         if [ -n "$existing_file" ]; then
             NETPLAN_FILE="$existing_file"
         else
@@ -191,12 +208,18 @@ update_netplan() {
     [ -z "$gateway" ] && gateway="$FIXED_GATEWAY"
     [ -z "$dns1" ] && dns1="$FIXED_IP"
     
+    # Detectar o arquivo ativo
+    detect_netplan_file
+    
     log "Atualizando netplan no arquivo: ${NETPLAN_FILE}"
     
+    # Backup do arquivo existente
     if [ -f "${NETPLAN_FILE}" ]; then
         cp "${NETPLAN_FILE}" "${NETPLAN_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+        success "Backup criado: $(basename ${NETPLAN_FILE}).backup"
     fi
     
+    # Criar/atualizar o arquivo detectado
     cat > ${NETPLAN_FILE} << EOF
 network:
   version: 2
@@ -218,30 +241,58 @@ network:
           - ${search_domain}
 EOF
     
+    success "Arquivo $(basename ${NETPLAN_FILE}) atualizado"
+    
+    # Desabilitar outros arquivos de rede (exceto backups)
     for file in /etc/netplan/*.yaml; do
-        if [ "$file" != "${NETPLAN_FILE}" ] && [ -f "$file" ]; then
-            mv "$file" "$file.disabled.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+        if [ -f "$file" ] && [ "$file" != "${NETPLAN_FILE}" ]; then
+            if [[ ! "$file" =~ \.backup\..*$ ]] && [[ ! "$file" =~ \.disabled\..*$ ]]; then
+                mv "$file" "$file.disabled.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+                info "Arquivo desabilitado: $(basename $file)"
+            fi
         fi
     done
     
-    success "Arquivo ${NETPLAN_FILE} atualizado"
+    success "Configuração salva no arquivo: $(basename ${NETPLAN_FILE})"
 }
+
+# ============================================
+# FUNÇÃO UNIFICADA PARA APLICAR NETPLAN
+# ============================================
 
 apply_netplan() {
     log "Aplicando configurações de rede..."
     
-    if netplan try --timeout 5 2>/dev/null; then
+    if [ ! -f "${NETPLAN_FILE}" ]; then
+        error "Arquivo de rede ${NETPLAN_FILE} não encontrado!"
+    fi
+    
+    echo -e "${BLUE}Conteúdo do arquivo ${NETPLAN_FILE}:${NC}"
+    cat "${NETPLAN_FILE}"
+    echo ""
+    
+    read -p "Deseja aplicar esta configuração? (S/n): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
+        info "Aplicação cancelada"
+        return
+    fi
+    
+    if netplan try --timeout 10 2>/dev/null; then
         success "Netplan configurado com sucesso!"
     else
-        warning "Falha ao aplicar netplan, tentando force..."
+        warning "Falha ao aplicar netplan try, tentando apply..."
         netplan apply 2>/dev/null
+        if [ $? -eq 0 ]; then
+            success "Netplan apply executado com sucesso"
+        else
+            error "Falha ao aplicar netplan"
+        fi
     fi
     
     systemctl restart systemd-networkd 2>/dev/null
     systemctl restart systemd-resolved 2>/dev/null
     
-    ip addr flush dev ${INTERFACE} 2>/dev/null
-    netplan apply 2>/dev/null
     sleep 3
     
     local new_ip=$(ip -4 addr show ${INTERFACE} 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
@@ -249,9 +300,15 @@ apply_netplan() {
         success "Nova configuração aplicada: ${new_ip}"
         FIXED_IP="$new_ip"
         NETWORK_CONFIGURED=true
+        
+        if [ -n "$HOSTNAME" ]; then
+            sed -i "/${HOSTNAME}/d" /etc/hosts 2>/dev/null
+            echo "${FIXED_IP} ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}" >> /etc/hosts
+        fi
+        
         return 0
     else
-        error "Falha ao aplicar configuração de rede"
+        error "Falha ao aplicar configuração de rede - IP não encontrado"
     fi
 }
 
@@ -306,7 +363,7 @@ configure_network() {
     echo ""
     
     echo -e "${WHITE}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${WHITE}║                    OPÇÕES DE REDE                            ║${NC}"
+    echo -e "${WHITE}║                    OPÇÕES DE REDE                           ║${NC}"
     echo -e "${WHITE}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${GREEN} 1)${NC} ${BOLD}Configurar IP Fixo${NC}"
@@ -503,6 +560,175 @@ test_connectivity() {
 }
 
 # ============================================
+# FUNÇÃO PARA ADICIONAR EQUIPAMENTO NA REDE
+# ============================================
+
+add_network_device() {
+    header "ADICIONAR EQUIPAMENTO NA REDE"
+    
+    echo -e "${CYAN}📋 Esta função permite adicionar um novo equipamento ao domínio${NC}"
+    echo -e "${CYAN}   (Computador, Servidor, Notebook, etc)${NC}"
+    echo ""
+    
+    # Verificar se o AD está rodando
+    if ! systemctl is-active --quiet samba-ad-dc; then
+        error "O serviço Samba AD não está rodando. Instale o AD primeiro."
+    fi
+    
+    echo -e "${BLUE}=== INFORMAÇÕES DO EQUIPAMENTO ===${NC}"
+    echo ""
+    
+    echo -e "${BLUE}Digite o nome do equipamento:${NC}"
+    read -p "> " DEVICE_NAME
+    if [ -z "$DEVICE_NAME" ]; then
+        error "Nome do equipamento é obrigatório!"
+    fi
+    
+    DEVICE_NAME=$(echo $DEVICE_NAME | tr '[:upper:]' '[:lower:]')
+    
+    echo -e "${BLUE}Digite o IP do equipamento:${NC}"
+    read -p "> " DEVICE_IP
+    if [ -z "$DEVICE_IP" ]; then
+        error "IP do equipamento é obrigatório!"
+    fi
+    
+    echo -e "${BLUE}Digite o MAC Address (opcional, Enter para pular):${NC}"
+    read -p "> " DEVICE_MAC
+    
+    echo -e "${BLUE}Tipo de equipamento:${NC}"
+    echo "  1) Computador (Workstation)"
+    echo "  2) Servidor (Server)"
+    echo "  3) Notebook (Laptop)"
+    echo "  4) Impressora (Printer)"
+    echo "  5) Outro"
+    read -p "> " DEVICE_TYPE
+    
+    case $DEVICE_TYPE in
+        1) DEVICE_CLASS="computer"; DEVICE_OU="Computadores" ;;
+        2) DEVICE_CLASS="server"; DEVICE_OU="Servidores" ;;
+        3) DEVICE_CLASS="computer"; DEVICE_OU="Notebooks" ;;
+        4) DEVICE_CLASS="printer"; DEVICE_OU="Impressoras" ;;
+        *) DEVICE_CLASS="computer"; DEVICE_OU="Outros" ;;
+    esac
+    
+    echo ""
+    echo -e "${YELLOW}⚠️  Resumo do equipamento:${NC}"
+    echo -e "  Nome: ${CYAN}${DEVICE_NAME}${NC}"
+    echo -e "  IP: ${CYAN}${DEVICE_IP}${NC}"
+    echo -e "  MAC: ${CYAN}${DEVICE_MAC:-Não informado}${NC}"
+    echo -e "  Tipo: ${CYAN}${DEVICE_CLASS} (${DEVICE_OU})${NC}"
+    echo ""
+    
+    read -p "Deseja adicionar este equipamento? (S/n): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
+        info "Operação cancelada"
+        return
+    fi
+    
+    log "Adicionando equipamento ${DEVICE_NAME} ao domínio..."
+    
+    # Adicionar o equipamento no AD
+    echo -e "${BLUE}1. Criando objeto no AD...${NC}"
+    if samba-tool computer add ${DEVICE_NAME} -H ldap://${PRIMARY_DC_IP} 2>/dev/null; then
+        success "Equipamento ${DEVICE_NAME} criado no AD"
+    else
+        warning "Falha ao criar equipamento no AD. Tentando método alternativo..."
+        if samba-tool computer add ${DEVICE_NAME} --ou=${DEVICE_OU} 2>/dev/null; then
+            success "Equipamento ${DEVICE_NAME} criado no AD (método alternativo)"
+        else
+            warning "Não foi possível criar o equipamento no AD. Verifique se o AD está funcionando."
+        fi
+    fi
+    
+    # Adicionar registro DNS
+    echo -e "${BLUE}2. Adicionando registro DNS...${NC}"
+    if samba-tool dns add ${PRIMARY_DC_IP} ${DOMAIN,,} ${DEVICE_NAME} A ${DEVICE_IP} -U ${ADMIN_USER} 2>/dev/null; then
+        success "Registro DNS criado: ${DEVICE_NAME}.${DOMAIN,,} -> ${DEVICE_IP}"
+    else
+        warning "Falha ao criar registro DNS. Tentando método alternativo..."
+        if samba-tool dns add 127.0.0.1 ${DOMAIN,,} ${DEVICE_NAME} A ${DEVICE_IP} 2>/dev/null; then
+            success "Registro DNS criado (método alternativo)"
+        else
+            warning "Não foi possível criar o registro DNS."
+        fi
+    fi
+    
+    # Adicionar entrada no /etc/hosts (local)
+    echo -e "${BLUE}3. Adicionando ao /etc/hosts...${NC}"
+    if ! grep -q "${DEVICE_NAME}" /etc/hosts; then
+        echo "${DEVICE_IP} ${DEVICE_NAME}.${DOMAIN,,} ${DEVICE_NAME}" >> /etc/hosts
+        success "Entrada adicionada ao /etc/hosts"
+    else
+        info "Equipamento já existe no /etc/hosts"
+    fi
+    
+    # Criar arquivo de configuração para o cliente
+    echo -e "${BLUE}4. Criando arquivo de configuração...${NC}"
+    cat > /root/device_${DEVICE_NAME}_info.txt << EOF
+═══════════════════════════════════════════════════════════════════
+            CONFIGURAÇÃO DO EQUIPAMENTO - ${DEVICE_NAME}
+═══════════════════════════════════════════════════════════════════
+
+INFORMAÇÕES:
+  Nome: ${DEVICE_NAME}
+  IP: ${DEVICE_IP}
+  MAC: ${DEVICE_MAC:-Não informado}
+  Tipo: ${DEVICE_CLASS}
+  Domínio: ${DOMAIN}
+  Data: $(date)
+
+CONFIGURAÇÃO DE REDE:
+  IP: ${DEVICE_IP}
+  Máscara: 255.255.255.0
+  Gateway: ${FIXED_GATEWAY}
+  DNS: ${PRIMARY_DC_IP} (Primário)
+  DNS2: 8.8.8.8 (Secundário)
+
+DOMÍNIO:
+  Nome: ${DOMAIN}
+  Servidor: ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,}
+  IP Servidor: ${PRIMARY_DC_IP}
+
+COMANDOS PARA ADICIONAR NO CLIENTE:
+  # Linux (Ubuntu/Debian)
+  sudo hostnamectl set-hostname ${DEVICE_NAME}.${DOMAIN,,}
+  sudo echo "${DEVICE_IP} ${DEVICE_NAME}.${DOMAIN,,} ${DEVICE_NAME}" >> /etc/hosts
+  
+  # Configurar DNS no cliente
+  sudo echo "nameserver ${PRIMARY_DC_IP}" > /etc/resolv.conf
+  sudo echo "search ${DOMAIN,,}" >> /etc/resolv.conf
+  sudo echo "domain ${DOMAIN,,}" >> /etc/resolv.conf
+
+  # Para adicionar ao domínio (Linux)
+  sudo realm join -U administrator ${DOMAIN,,}
+
+  # Para adicionar ao domínio (Windows)
+  # Painel de Controle > Sistema > Alterar configurações > Domínio: ${DOMAIN}
+  # Usuário: ${ADMIN_USER}@${DOMAIN}
+  # Senha: [senha do administrador]
+
+═══════════════════════════════════════════════════════════════════
+EOF
+
+    success "Arquivo de configuração criado: /root/device_${DEVICE_NAME}_info.txt"
+    
+    echo ""
+    echo -e "${GREEN}✅ Equipamento ${DEVICE_NAME} adicionado com sucesso!${NC}"
+    echo ""
+    echo -e "${YELLOW}📁 Arquivo de configuração:${NC}"
+    echo -e "  ${BLUE}/root/device_${DEVICE_NAME}_info.txt${NC}"
+    echo ""
+    echo -e "${YELLOW}📋 Comandos para configurar o cliente:${NC}"
+    echo -e "  ${BLUE}hostnamectl set-hostname ${DEVICE_NAME}.${DOMAIN,,}${NC}"
+    echo -e "  ${BLUE}echo 'nameserver ${PRIMARY_DC_IP}' > /etc/resolv.conf${NC}"
+    echo -e "  ${BLUE}realm join -U administrator ${DOMAIN,,}${NC}"
+    echo ""
+    
+    read -p "Pressione ENTER para continuar..."
+}
+
+# ============================================
 # FUNÇÃO PARA COLETAR CONFIGURAÇÕES
 # ============================================
 
@@ -603,15 +829,6 @@ collect_configurations() {
         error "Instalação cancelada pelo usuário"
     fi
 }
-
-# ============================================
-# REPLICAÇÃO - FUNÇÕES (MANTIDAS DA VERSÃO ANTERIOR)
-# ============================================
-
-# [Aqui manter todas as funções de replicação da versão anterior]
-# check_replication_status, force_replication, replicate_from_specific_dc,
-# check_replication_differences, check_dns_on_dcs, check_users_on_dcs,
-# setup_auto_replication, replication_menu
 
 # ============================================
 # FUNÇÕES DE INSTALAÇÃO
@@ -739,6 +956,7 @@ install_packages() {
         curl wget htop \
         traceroute mtr nmap tcpdump \
         sshpass ntpdate \
+        realmd adcli sssd \
         2>>"$LOG_FILE"
     
     if [ $? -eq 0 ]; then
@@ -1207,7 +1425,7 @@ show_menu() {
     print_banner
     
     echo -e "${WHITE}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${WHITE}║                    SEJA BEM-VINDO!                           ║${NC}"
+    echo -e "${WHITE}║                    SEJA BEM-VINDO!                          ║${NC}"
     echo -e "${WHITE}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${CYAN}📋 Este script irá instalar e configurar um Controlador de Domínio${NC}"
@@ -1236,7 +1454,7 @@ show_menu() {
     echo ""
     
     echo -e "${WHITE}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${WHITE}║                    MENU PRINCIPAL                            ║${NC}"
+    echo -e "${WHITE}║                    MENU PRINCIPAL                           ║${NC}"
     echo -e "${WHITE}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${GREEN} 1)${NC} ${BOLD}CONFIGURAR REDE${NC}"
@@ -1248,8 +1466,8 @@ show_menu() {
     echo -e "${GREEN} 3)${NC} ${BOLD}INSTALAR CONTROLADOR SECUNDÁRIO${NC}"
     echo -e "     ${CYAN}➜${NC} DC adicional para redundância"
     echo ""
-    echo -e "${GREEN} 4)${NC} ${BOLD}GERENCIAR REPLICAÇÃO AD${NC}"
-    echo -e "     ${CYAN}➜${NC} Forçar sincronização entre DCs"
+    echo -e "${GREEN} 4)${NC} ${BOLD}ADICIONAR EQUIPAMENTO NA REDE${NC}"
+    echo -e "     ${CYAN}➜${NC} Adicionar computador/servidor ao domínio"
     echo ""
     echo -e "${RED} 5)${NC} ${BOLD}SAIR${NC}"
     echo ""
@@ -1274,8 +1492,7 @@ get_installation_type() {
                 break
                 ;;
             4)
-                # Chamar menu de replicação
-                echo -e "${YELLOW}Função de replicação será implementada...${NC}"
+                add_network_device
                 return 0
                 ;;
             5)
@@ -1310,7 +1527,7 @@ finalize_installation() {
     header "✅ INSTALAÇÃO CONCLUÍDA!"
     
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}         CONTROLADOR DE DOMÍNIO INSTALADO COM SUCESSO!             ${NC}"
+    echo -e "${GREEN}         CONTROLADOR DE DOMÍNIO INSTALADO COM SUCESSO!           ${NC}"
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${NC}"
     echo ""
     echo -e "${YELLOW}📌 ACESSO:${NC}"
