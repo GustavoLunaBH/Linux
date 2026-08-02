@@ -91,15 +91,15 @@ print_banner() {
     echo -e "${MAGENTA}"
     echo "    ╔══════════════════════════════════════════════════════════════╗"
     echo "    ║                                                              ║"
-    echo "    ║     █████╗ ██████╗      ███████╗███████╗████████╗██╗   ██╗  ║"
-    echo "    ║    ██╔══██╗██╔══██╗     ██╔════╝██╔════╝╚══██╔══╝██║   ██║  ║"
-    echo "    ║    ███████║██║  ██║     ███████╗█████╗     ██║   ██║   ██║  ║"
-    echo "    ║    ██╔══██║██║  ██║     ╚════██║██╔══╝     ██║   ██║   ██║  ║"
-    echo "    ║    ██║  ██║██████╔╝     ███████║███████╗   ██║   ╚██████╔╝  ║"
-    echo "    ║    ╚═╝  ╚═╝╚═════╝      ╚══════╝╚══════╝   ╚═╝    ╚═════╝   ║"
+    echo "    ║     █████╗ ██████╗      ███████╗███████╗████████╗██╗   ██╗   ║"
+    echo "    ║    ██╔══██╗██╔══██╗     ██╔════╝██╔════╝╚══██╔══╝██║   ██║   ║"
+    echo "    ║    ███████║██║  ██║     ███████╗█████╗     ██║   ██║   ██║   ║"
+    echo "    ║    ██╔══██║██║  ██║     ╚════██║██╔══╝     ██║   ██║   ██║   ║"
+    echo "    ║    ██║  ██║██████╔╝     ███████║███████╗   ██║   ╚██████╔╝   ║"
+    echo "    ║    ╚═╝  ╚═╝╚═════╝      ╚══════╝╚══════╝   ╚═╝    ╚═════╝    ║"
     echo "    ║                                                              ║"
     echo "    ║           INSTALADOR DO CONTROLADOR DE DOMÍNIO               ║"
-    echo "    ║                  Samba AD - Versão ${SCRIPT_VERSION}                        ║"
+    echo "    ║                  Samba AD - Versão ${SCRIPT_VERSION}                       ║"
     echo "    ╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -306,7 +306,7 @@ configure_network() {
     echo ""
     
     echo -e "${WHITE}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${WHITE}║                    OPÇÕES DE REDE                           ║${NC}"
+    echo -e "${WHITE}║                    OPÇÕES DE REDE                            ║${NC}"
     echo -e "${WHITE}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${GREEN} 1)${NC} ${BOLD}Configurar IP Fixo${NC}"
@@ -1207,7 +1207,7 @@ show_menu() {
     print_banner
     
     echo -e "${WHITE}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${WHITE}║                    SEJA BEM-VINDO!                          ║${NC}"
+    echo -e "${WHITE}║                    SEJA BEM-VINDO!                           ║${NC}"
     echo -e "${WHITE}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${CYAN}📋 Este script irá instalar e configurar um Controlador de Domínio${NC}"
@@ -1236,7 +1236,7 @@ show_menu() {
     echo ""
     
     echo -e "${WHITE}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${WHITE}║                    MENU PRINCIPAL                           ║${NC}"
+    echo -e "${WHITE}║                    MENU PRINCIPAL                            ║${NC}"
     echo -e "${WHITE}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${GREEN} 1)${NC} ${BOLD}CONFIGURAR REDE${NC}"
@@ -1310,7 +1310,7 @@ finalize_installation() {
     header "✅ INSTALAÇÃO CONCLUÍDA!"
     
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}         CONTROLADOR DE DOMÍNIO INSTALADO COM SUCESSO!           ${NC}"
+    echo -e "${GREEN}         CONTROLADOR DE DOMÍNIO INSTALADO COM SUCESSO!             ${NC}"
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${NC}"
     echo ""
     echo -e "${YELLOW}📌 ACESSO:${NC}"
