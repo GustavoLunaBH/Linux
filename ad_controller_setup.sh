@@ -1,11 +1,13 @@
 #!/bin/bash
 # ad_controller_setup.sh
 # Script completo para instalação do Samba AD - Controlador de Domínio
-# Versão: 3.0 - Com correções de rede e adição de equipamentos
+# Versão: 3.1 - Organizado por Módulos
 
 # ============================================
-# CORES PARA OUTPUT
+# MÓDULO 1: CONFIGURAÇÕES GLOBAIS E CORES
 # ============================================
+
+# Cores para output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -16,9 +18,7 @@ WHITE='\033[1;37m'
 NC='\033[0m'
 BOLD='\033[1m'
 
-# ============================================
-# CONFIGURAÇÕES PADRÃO
-# ============================================
+# Configurações padrão
 DOMAIN="RNV.INTRA"
 REALM="RNV.INTRA"
 SHORT_DOMAIN="RNV"
@@ -31,7 +31,7 @@ DNS_FORWARDER="8.8.8.8"
 NTP_SERVER="a.st1.ntp.br"
 PRIMARY_DC_IP="192.168.1.2"
 PRIMARY_DC_HOSTNAME="adserver01"
-SCRIPT_VERSION="3.0"
+SCRIPT_VERSION="3.1"
 LOG_FILE="/tmp/ad_setup_$(date +%Y%m%d_%H%M%S).log"
 INSTALLATION_TYPE=""
 HOSTNAME=""
@@ -41,7 +41,7 @@ OS_INFO=""
 KERNEL_VERSION=""
 
 # ============================================
-# FUNÇÕES PRINCIPAIS
+# MÓDULO 2: FUNÇÕES DE LOG E UTILITÁRIOS
 # ============================================
 
 log() {
@@ -104,8 +104,13 @@ print_banner() {
     echo -e "${NC}"
 }
 
+press_enter() {
+    echo ""
+    read -p "Pressione ENTER para continuar..."
+}
+
 # ============================================
-# DETECÇÃO DE SISTEMA - FUNÇÕES REUTILIZÁVEIS
+# MÓDULO 3: DETECÇÃO DE SISTEMA
 # ============================================
 
 detect_interface() {
@@ -154,7 +159,6 @@ detect_netplan_file() {
     # Verificar qual arquivo está ativo (não desabilitado)
     local active_file=""
     
-    # Primeiro, verificar se existe algum arquivo .yaml que NÃO seja backup ou disabled
     for file in /etc/netplan/*.yaml; do
         if [ -f "$file" ] && [[ ! "$file" =~ \.backup\..*$ ]] && [[ ! "$file" =~ \.disabled\..*$ ]]; then
             active_file="$file"
@@ -167,7 +171,6 @@ detect_netplan_file() {
         return
     fi
     
-    # Se não encontrou arquivo ativo, verificar os padrões
     if [ -f "/etc/netplan/50-cloud-init.yaml" ]; then
         NETPLAN_FILE="/etc/netplan/50-cloud-init.yaml"
     elif [ -f "/etc/netplan/01-netcfg.yaml" ]; then
@@ -192,8 +195,20 @@ detect_all() {
     detect_netplan_file
 }
 
+auto_detect() {
+    header "DETECTANDO CONFIGURAÇÕES DO SISTEMA"
+    detect_all
+    echo ""
+    echo -e "  Interface: ${CYAN}${INTERFACE}${NC}"
+    echo -e "  IP: ${CYAN}${FIXED_IP:-Não detectado}${NC}"
+    echo -e "  Gateway: ${CYAN}${FIXED_GATEWAY}${NC}"
+    echo -e "  Domínio: ${CYAN}${DOMAIN}${NC}"
+    echo -e "  Arquivo Rede: ${CYAN}${NETPLAN_FILE}${NC}"
+    echo ""
+}
+
 # ============================================
-# FUNÇÃO UNIFICADA PARA CRIAR/ATUALIZAR NETPLAN
+# MÓDULO 4: GERENCIAMENTO DE REDE
 # ============================================
 
 update_netplan() {
@@ -208,18 +223,15 @@ update_netplan() {
     [ -z "$gateway" ] && gateway="$FIXED_GATEWAY"
     [ -z "$dns1" ] && dns1="$FIXED_IP"
     
-    # Detectar o arquivo ativo
     detect_netplan_file
     
     log "Atualizando netplan no arquivo: ${NETPLAN_FILE}"
     
-    # Backup do arquivo existente
     if [ -f "${NETPLAN_FILE}" ]; then
         cp "${NETPLAN_FILE}" "${NETPLAN_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
         success "Backup criado: $(basename ${NETPLAN_FILE}).backup"
     fi
     
-    # Criar/atualizar o arquivo detectado
     cat > ${NETPLAN_FILE} << EOF
 network:
   version: 2
@@ -243,7 +255,6 @@ EOF
     
     success "Arquivo $(basename ${NETPLAN_FILE}) atualizado"
     
-    # Desabilitar outros arquivos de rede (exceto backups)
     for file in /etc/netplan/*.yaml; do
         if [ -f "$file" ] && [ "$file" != "${NETPLAN_FILE}" ]; then
             if [[ ! "$file" =~ \.backup\..*$ ]] && [[ ! "$file" =~ \.disabled\..*$ ]]; then
@@ -252,23 +263,23 @@ EOF
             fi
         fi
     done
-    
-    success "Configuração salva no arquivo: $(basename ${NETPLAN_FILE})"
 }
 
-# ============================================
-# FUNÇÃO UNIFICADA PARA APLICAR NETPLAN
-# ============================================
-
 apply_netplan() {
+    header "APLICANDO CONFIGURAÇÕES DE REDE"
+    
     log "Aplicando configurações de rede..."
     
     if [ ! -f "${NETPLAN_FILE}" ]; then
         error "Arquivo de rede ${NETPLAN_FILE} não encontrado!"
     fi
     
-    echo -e "${BLUE}Conteúdo do arquivo ${NETPLAN_FILE}:${NC}"
+    echo -e "${BLUE}Arquivo que será aplicado: ${CYAN}${NETPLAN_FILE}${NC}"
+    echo ""
+    echo -e "${BLUE}Conteúdo do arquivo:${NC}"
+    echo -e "${YELLOW}─────────────────────────────────────────────────────${NC}"
     cat "${NETPLAN_FILE}"
+    echo -e "${YELLOW}─────────────────────────────────────────────────────${NC}"
     echo ""
     
     read -p "Deseja aplicar esta configuração? (S/n): " -n 1 -r
@@ -278,6 +289,7 @@ apply_netplan() {
         return
     fi
     
+    echo -e "${BLUE}Testando configuração com netplan try...${NC}"
     if netplan try --timeout 10 2>/dev/null; then
         success "Netplan configurado com sucesso!"
     else
@@ -290,6 +302,7 @@ apply_netplan() {
         fi
     fi
     
+    echo -e "${BLUE}Reiniciando serviços de rede...${NC}"
     systemctl restart systemd-networkd 2>/dev/null
     systemctl restart systemd-resolved 2>/dev/null
     
@@ -297,18 +310,20 @@ apply_netplan() {
     
     local new_ip=$(ip -4 addr show ${INTERFACE} 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
     if [ -n "$new_ip" ]; then
-        success "Nova configuração aplicada: ${new_ip}"
+        success "✅ Nova configuração aplicada com sucesso!"
+        echo -e "  ${GREEN}IP: ${CYAN}${new_ip}${NC}"
         FIXED_IP="$new_ip"
         NETWORK_CONFIGURED=true
         
         if [ -n "$HOSTNAME" ]; then
             sed -i "/${HOSTNAME}/d" /etc/hosts 2>/dev/null
             echo "${FIXED_IP} ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}" >> /etc/hosts
+            success "Hosts atualizado"
         fi
         
         return 0
     else
-        error "Falha ao aplicar configuração de rede - IP não encontrado"
+        error "❌ Falha ao aplicar configuração de rede - IP não encontrado"
     fi
 }
 
@@ -328,79 +343,8 @@ stop_dhcp_services() {
 }
 
 # ============================================
-# AUTO DETECT
+# MÓDULO 5: MENU DE CONFIGURAÇÃO DE REDE
 # ============================================
-
-auto_detect() {
-    header "DETECTANDO CONFIGURAÇÕES DO SISTEMA"
-    detect_all
-    echo ""
-    echo -e "  Interface: ${CYAN}${INTERFACE}${NC}"
-    echo -e "  IP: ${CYAN}${FIXED_IP:-Não detectado}${NC}"
-    echo -e "  Gateway: ${CYAN}${FIXED_GATEWAY}${NC}"
-    echo -e "  Domínio: ${CYAN}${DOMAIN}${NC}"
-    echo -e "  Arquivo Rede: ${CYAN}${NETPLAN_FILE}${NC}"
-    echo ""
-}
-
-# ============================================
-# MENU DE CONFIGURAÇÃO DE REDE
-# ============================================
-
-configure_network() {
-    header "CONFIGURAÇÃO DE REDE"
-    
-    echo -e "${YELLOW}⚠️  ATENÇÃO: A configuração de rede deve ser feita ANTES da instalação${NC}"
-    echo ""
-    
-    detect_all
-    
-    echo -e "${BLUE}Configurações atuais do sistema:${NC}"
-    echo -e "  Interface: ${CYAN}${INTERFACE}${NC}"
-    echo -e "  IP Atual: ${CYAN}${FIXED_IP:-Não detectado}${NC}"
-    echo -e "  Gateway: ${CYAN}${FIXED_GATEWAY}${NC}"
-    echo -e "  Arquivo Rede: ${CYAN}${NETPLAN_FILE}${NC}"
-    echo ""
-    
-    echo -e "${WHITE}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${WHITE}║                    OPÇÕES DE REDE                           ║${NC}"
-    echo -e "${WHITE}╚══════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    echo -e "${GREEN} 1)${NC} ${BOLD}Configurar IP Fixo${NC}"
-    echo -e "     ${CYAN}➜${NC} Define IP, máscara e gateway"
-    echo ""
-    echo -e "${GREEN} 2)${NC} ${BOLD}Configurar DNS${NC}"
-    echo -e "     ${CYAN}➜${NC} Define servidores DNS"
-    echo ""
-    echo -e "${GREEN} 3)${NC} ${BOLD}Verificar Configuração${NC}"
-    echo -e "     ${CYAN}➜${NC} Mostra configurações atuais"
-    echo ""
-    echo -e "${GREEN} 4)${NC} ${BOLD}Testar Conectividade${NC}"
-    echo -e "     ${CYAN}➜${NC} Testa ping e resolução DNS"
-    echo ""
-    echo -e "${GREEN} 5)${NC} ${BOLD}Aplicar e Reiniciar Rede${NC}"
-    echo -e "     ${CYAN}➜${NC} Aplica configurações e reinicia rede"
-    echo ""
-    echo -e "${GREEN} 6)${NC} ${BOLD}Voltar ao Menu Principal${NC}"
-    echo ""
-    echo -e "${WHITE}═══════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    
-    while true; do
-        read -p "👉 Escolha uma opção [1-6]: " choice
-        case $choice in
-            1) configure_fixed_ip; break ;;
-            2) configure_dns_settings; break ;;
-            3) show_network_status; break ;;
-            4) test_connectivity; break ;;
-            5) apply_netplan; break ;;
-            6) return 0 ;;
-            *) echo -e "${RED}Opção inválida! Tente novamente.${NC}" ;;
-        esac
-    done
-    
-    configure_network
-}
 
 configure_fixed_ip() {
     header "CONFIGURANDO IP FIXO"
@@ -433,7 +377,7 @@ configure_fixed_ip() {
     echo -e "  Arquivo: ${CYAN}${NETPLAN_FILE}${NC}"
     echo ""
     
-    read -p "Deseja aplicar esta configuração? (S/n): " -n 1 -r
+    read -p "Deseja salvar esta configuração? (S/n): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Nn]$ ]]; then
         info "Configuração cancelada"
@@ -441,8 +385,17 @@ configure_fixed_ip() {
     fi
     
     update_netplan "${FIXED_IP}" "${NETMASK_INPUT}" "${FIXED_GATEWAY}"
+    success "Configuração salva no arquivo: $(basename ${NETPLAN_FILE})"
     
-    success "Configuração salva. Use a Opção 5 para aplicar e reiniciar a rede."
+    echo ""
+    echo -e "${BLUE}Deseja aplicar a configuração agora? (S/n): ${NC}"
+    read -p "> " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Ss]$ ]] || [[ -z "$REPLY" ]]; then
+        apply_netplan
+    else
+        info "Configuração salva. Use a Opção 5 do menu para aplicar depois."
+    fi
 }
 
 configure_dns_settings() {
@@ -467,7 +420,7 @@ configure_dns_settings() {
     echo -e "  Domínio: ${CYAN}${SEARCH_DOMAIN}${NC}"
     echo ""
     
-    read -p "Deseja aplicar esta configuração? (S/n): " -n 1 -r
+    read -p "Deseja salvar esta configuração? (S/n): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Nn]$ ]]; then
         info "Configuração cancelada"
@@ -489,6 +442,16 @@ EOF
     update_netplan "${FIXED_IP}" "24" "${FIXED_GATEWAY}" "${DNS1}" "${DNS2}" "${SEARCH_DOMAIN}"
     
     success "DNS configurado com sucesso!"
+    
+    echo ""
+    echo -e "${BLUE}Deseja aplicar a configuração agora? (S/n): ${NC}"
+    read -p "> " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Ss]$ ]] || [[ -z "$REPLY" ]]; then
+        apply_netplan
+    else
+        info "Configuração salva. Use a Opção 5 do menu para aplicar depois."
+    fi
 }
 
 show_network_status() {
@@ -518,7 +481,7 @@ show_network_status() {
     cat /etc/resolv.conf 2>/dev/null || echo "  Arquivo /etc/resolv.conf não encontrado"
     echo ""
     
-    read -p "Pressione ENTER para continuar..."
+    press_enter
 }
 
 test_connectivity() {
@@ -556,11 +519,64 @@ test_connectivity() {
     fi
     echo ""
     
-    read -p "Pressione ENTER para continuar..."
+    press_enter
+}
+
+configure_network_menu() {
+    header "CONFIGURAÇÃO DE REDE"
+    
+    echo -e "${YELLOW}⚠️  ATENÇÃO: A configuração de rede deve ser feita ANTES da instalação${NC}"
+    echo ""
+    
+    detect_all
+    
+    echo -e "${BLUE}Configurações atuais do sistema:${NC}"
+    echo -e "  Interface: ${CYAN}${INTERFACE}${NC}"
+    echo -e "  IP Atual: ${CYAN}${FIXED_IP:-Não detectado}${NC}"
+    echo -e "  Gateway: ${CYAN}${FIXED_GATEWAY}${NC}"
+    echo -e "  Arquivo Rede: ${CYAN}${NETPLAN_FILE}${NC}"
+    echo ""
+    
+    echo -e "${WHITE}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${WHITE}║                    OPÇÕES DE REDE                           ║${NC}"
+    echo -e "${WHITE}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${GREEN} 1)${NC} ${BOLD}Configurar IP Fixo${NC}"
+    echo -e "     ${CYAN}➜${NC} Define IP, máscara e gateway"
+    echo ""
+    echo -e "${GREEN} 2)${NC} ${BOLD}Configurar DNS${NC}"
+    echo -e "     ${CYAN}➜${NC} Define servidores DNS"
+    echo ""
+    echo -e "${GREEN} 3)${NC} ${BOLD}Verificar Configuração${NC}"
+    echo -e "     ${CYAN}➜${NC} Mostra configurações atuais"
+    echo ""
+    echo -e "${GREEN} 4)${NC} ${BOLD}Testar Conectividade${NC}"
+    echo -e "     ${CYAN}➜${NC} Testa ping e resolução DNS"
+    echo ""
+    echo -e "${GREEN} 5)${NC} ${BOLD}Aplicar Configurações${NC}"
+    echo -e "     ${CYAN}➜${NC} Aplica as configurações salvas"
+    echo ""
+    echo -e "${GREEN} 6)${NC} ${BOLD}Voltar ao Menu Principal${NC}"
+    echo ""
+    echo -e "${WHITE}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    while true; do
+        read -p "👉 Escolha uma opção [1-6]: " choice
+        case $choice in
+            1) configure_fixed_ip; press_enter ;;
+            2) configure_dns_settings; press_enter ;;
+            3) show_network_status ;;
+            4) test_connectivity ;;
+            5) apply_netplan; press_enter ;;
+            6) return 0 ;;
+            *) echo -e "${RED}Opção inválida! Tente novamente.${NC}" ;;
+        esac
+    done
 }
 
 # ============================================
-# FUNÇÃO PARA ADICIONAR EQUIPAMENTO NA REDE
+# MÓDULO 6: ADICIONAR EQUIPAMENTO
 # ============================================
 
 add_network_device() {
@@ -570,7 +586,6 @@ add_network_device() {
     echo -e "${CYAN}   (Computador, Servidor, Notebook, etc)${NC}"
     echo ""
     
-    # Verificar se o AD está rodando
     if ! systemctl is-active --quiet samba-ad-dc; then
         error "O serviço Samba AD não está rodando. Instale o AD primeiro."
     fi
@@ -583,7 +598,6 @@ add_network_device() {
     if [ -z "$DEVICE_NAME" ]; then
         error "Nome do equipamento é obrigatório!"
     fi
-    
     DEVICE_NAME=$(echo $DEVICE_NAME | tr '[:upper:]' '[:lower:]')
     
     echo -e "${BLUE}Digite o IP do equipamento:${NC}"
@@ -628,7 +642,6 @@ add_network_device() {
     
     log "Adicionando equipamento ${DEVICE_NAME} ao domínio..."
     
-    # Adicionar o equipamento no AD
     echo -e "${BLUE}1. Criando objeto no AD...${NC}"
     if samba-tool computer add ${DEVICE_NAME} -H ldap://${PRIMARY_DC_IP} 2>/dev/null; then
         success "Equipamento ${DEVICE_NAME} criado no AD"
@@ -637,24 +650,17 @@ add_network_device() {
         if samba-tool computer add ${DEVICE_NAME} --ou=${DEVICE_OU} 2>/dev/null; then
             success "Equipamento ${DEVICE_NAME} criado no AD (método alternativo)"
         else
-            warning "Não foi possível criar o equipamento no AD. Verifique se o AD está funcionando."
+            warning "Não foi possível criar o equipamento no AD."
         fi
     fi
     
-    # Adicionar registro DNS
     echo -e "${BLUE}2. Adicionando registro DNS...${NC}"
     if samba-tool dns add ${PRIMARY_DC_IP} ${DOMAIN,,} ${DEVICE_NAME} A ${DEVICE_IP} -U ${ADMIN_USER} 2>/dev/null; then
         success "Registro DNS criado: ${DEVICE_NAME}.${DOMAIN,,} -> ${DEVICE_IP}"
     else
-        warning "Falha ao criar registro DNS. Tentando método alternativo..."
-        if samba-tool dns add 127.0.0.1 ${DOMAIN,,} ${DEVICE_NAME} A ${DEVICE_IP} 2>/dev/null; then
-            success "Registro DNS criado (método alternativo)"
-        else
-            warning "Não foi possível criar o registro DNS."
-        fi
+        warning "Falha ao criar registro DNS."
     fi
     
-    # Adicionar entrada no /etc/hosts (local)
     echo -e "${BLUE}3. Adicionando ao /etc/hosts...${NC}"
     if ! grep -q "${DEVICE_NAME}" /etc/hosts; then
         echo "${DEVICE_IP} ${DEVICE_NAME}.${DOMAIN,,} ${DEVICE_NAME}" >> /etc/hosts
@@ -663,7 +669,6 @@ add_network_device() {
         info "Equipamento já existe no /etc/hosts"
     fi
     
-    # Criar arquivo de configuração para o cliente
     echo -e "${BLUE}4. Criando arquivo de configuração...${NC}"
     cat > /root/device_${DEVICE_NAME}_info.txt << EOF
 ═══════════════════════════════════════════════════════════════════
@@ -725,11 +730,11 @@ EOF
     echo -e "  ${BLUE}realm join -U administrator ${DOMAIN,,}${NC}"
     echo ""
     
-    read -p "Pressione ENTER para continuar..."
+    press_enter
 }
 
 # ============================================
-# FUNÇÃO PARA COLETAR CONFIGURAÇÕES
+# MÓDULO 7: FUNÇÕES DE INSTALAÇÃO
 # ============================================
 
 collect_configurations() {
@@ -760,31 +765,23 @@ collect_configurations() {
     fi
     echo -e "  [${DEFAULT_HOSTNAME}]"
     read -p "> " HOSTNAME
-    if [ -z "$HOSTNAME" ]; then
-        HOSTNAME="$DEFAULT_HOSTNAME"
-    fi
+    [ -z "$HOSTNAME" ] && HOSTNAME="$DEFAULT_HOSTNAME"
     HOSTNAME=$(echo $HOSTNAME | tr '[:upper:]' '[:lower:]')
     
     echo -e "${BLUE}Digite o DNS forwarder [${DNS_FORWARDER}]:${NC}"
     read -p "> " DNS_FORWARDER
-    if [ -z "$DNS_FORWARDER" ]; then
-        DNS_FORWARDER="8.8.8.8"
-    fi
+    [ -z "$DNS_FORWARDER" ] && DNS_FORWARDER="8.8.8.8"
     
     if [ "$INSTALLATION_TYPE" == "secondary" ]; then
         echo ""
         echo -e "${YELLOW}📌 Configurações do DC Primário:${NC}"
         echo -e "${BLUE}Digite o IP do primário [${PRIMARY_DC_IP}]:${NC}"
         read -p "> " PRIMARY_IP_INPUT
-        if [ -n "$PRIMARY_IP_INPUT" ]; then
-            PRIMARY_DC_IP="$PRIMARY_IP_INPUT"
-        fi
+        [ -n "$PRIMARY_IP_INPUT" ] && PRIMARY_DC_IP="$PRIMARY_IP_INPUT"
         
         echo -e "${BLUE}Digite o hostname do primário [${PRIMARY_DC_HOSTNAME}]:${NC}"
         read -p "> " PRIMARY_HOST_INPUT
-        if [ -n "$PRIMARY_HOST_INPUT" ]; then
-            PRIMARY_DC_HOSTNAME="$PRIMARY_HOST_INPUT"
-        fi
+        [ -n "$PRIMARY_HOST_INPUT" ] && PRIMARY_DC_HOSTNAME="$PRIMARY_HOST_INPUT"
         PRIMARY_DC_HOSTNAME=$(echo $PRIMARY_DC_HOSTNAME | tr '[:upper:]' '[:lower:]')
     fi
     
@@ -831,7 +828,7 @@ collect_configurations() {
 }
 
 # ============================================
-# FUNÇÕES DE INSTALAÇÃO
+# MÓDULO 8: CONFIGURAÇÕES BÁSICAS DO SISTEMA
 # ============================================
 
 fix_system_dns() {
@@ -843,9 +840,7 @@ fix_system_dns() {
     mkdir -p /etc/resolvconf/resolv.conf.d 2>/dev/null
     
     local dns_primary="${FIXED_IP}"
-    if [ "$INSTALLATION_TYPE" == "secondary" ]; then
-        dns_primary="${PRIMARY_DC_IP}"
-    fi
+    [ "$INSTALLATION_TYPE" == "secondary" ] && dns_primary="${PRIMARY_DC_IP}"
     
     cat > /etc/resolv.conf << EOF
 nameserver ${dns_primary}
@@ -873,11 +868,33 @@ EOF
     
     chattr +i /etc/resolv.conf 2>/dev/null || true
     
-    if ping -c 1 8.8.8.8 &> /dev/null; then
-        success "DNS configurado e funcionando"
-    else
-        warning "DNS configurado, mas teste falhou"
-    fi
+    ping -c 1 8.8.8.8 &> /dev/null && success "DNS configurado e funcionando" || warning "DNS configurado, mas teste falhou"
+}
+
+configure_dns_secondary() {
+    header "CONFIGURANDO DNS SECUNDÁRIO"
+    
+    log "Configurando /etc/resolv.conf..."
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    rm -f /etc/resolv.conf
+    
+    cat > /etc/resolv.conf << EOF
+nameserver ${PRIMARY_DC_IP}
+nameserver 8.8.8.8
+search ${DOMAIN,,}
+domain ${DOMAIN,,}
+EOF
+    chattr +i /etc/resolv.conf 2>/dev/null || true
+    
+    cat > /etc/hosts << EOF
+127.0.0.1 localhost
+127.0.1.1 ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
+${FIXED_IP} ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
+${FIXED_IP} ${HOSTNAME}
+${PRIMARY_DC_IP} ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,} ${PRIMARY_DC_HOSTNAME}
+EOF
+    
+    success "DNS e hosts configurados"
 }
 
 configure_locale() {
@@ -895,9 +912,7 @@ configure_ntp() {
     log "Configurando NTP..."
     
     local ntp_servers="${NTP_SERVER}"
-    if [ "$INSTALLATION_TYPE" == "secondary" ]; then
-        ntp_servers="${PRIMARY_DC_IP} ${NTP_SERVER}"
-    fi
+    [ "$INSTALLATION_TYPE" == "secondary" ] && ntp_servers="${PRIMARY_DC_IP} ${NTP_SERVER}"
     
     cat > /etc/chrony/chrony.conf << EOF
 server ${ntp_servers} iburst
@@ -916,6 +931,20 @@ EOF
     success "NTP configurado"
 }
 
+sync_time() {
+    header "SINCRONIZANDO HORA"
+    
+    log "Sincronizando com o primário..."
+    apt install -y ntpdate 2>/dev/null || true
+    
+    if ntpdate -u ${PRIMARY_DC_IP} 2>/dev/null; then
+        success "Hora sincronizada com o primário"
+    else
+        ntpdate -u pool.ntp.br 2>/dev/null || true
+        info "Hora sincronizada via internet"
+    fi
+}
+
 configure_hostname() {
     log "Configurando hostname..."
     hostnamectl set-hostname ${HOSTNAME}.${DOMAIN,,} 2>>"$LOG_FILE"
@@ -927,11 +956,7 @@ ${FIXED_IP} ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
 ${FIXED_IP} ${HOSTNAME}
 EOF
 
-    if [ "$INSTALLATION_TYPE" == "secondary" ]; then
-        cat >> /etc/hosts << EOF
-${PRIMARY_DC_IP} ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,} ${PRIMARY_DC_HOSTNAME}
-EOF
-    fi
+    [ "$INSTALLATION_TYPE" == "secondary" ] && echo "${PRIMARY_DC_IP} ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,} ${PRIMARY_DC_HOSTNAME}" >> /etc/hosts
     
     success "Hostname configurado: ${HOSTNAME}.${DOMAIN,,}"
 }
@@ -972,8 +997,23 @@ install_packages() {
     fi
 }
 
+common_setup() {
+    log "Executando configurações comuns..."
+    
+    if [ "$INSTALLATION_TYPE" == "secondary" ]; then
+        configure_dns_secondary
+    else
+        fix_system_dns
+    fi
+    
+    configure_locale
+    configure_ntp
+    install_packages
+    configure_hostname
+}
+
 # ============================================
-# INSTALAÇÃO PRIMÁRIA
+# MÓDULO 9: INSTALAÇÃO PRIMÁRIA
 # ============================================
 
 provision_domain() {
@@ -1005,20 +1045,14 @@ provision_domain() {
         --option="dns forwarder=${DNS_FORWARDER}" \
         >>"$LOG_FILE" 2>&1
     
-    if [ $? -eq 0 ]; then
-        success "Domínio provisionado com sucesso!"
-    else
-        error "Falha no provisionamento. Verifique o log: $LOG_FILE"
-    fi
+    [ $? -eq 0 ] && success "Domínio provisionado com sucesso!" || error "Falha no provisionamento. Verifique o log: $LOG_FILE"
 }
 
 configure_samba_primary() {
     log "Configurando samba.conf..."
     
-    if [ ! -f "/etc/samba/smb.conf" ]; then
-        if [ -f "/var/lib/samba/private/smb.conf" ]; then
-            cp /var/lib/samba/private/smb.conf /etc/samba/smb.conf
-        fi
+    if [ ! -f "/etc/samba/smb.conf" ] && [ -f "/var/lib/samba/private/smb.conf" ]; then
+        cp /var/lib/samba/private/smb.conf /etc/samba/smb.conf
     fi
     
     cat >> /etc/samba/smb.conf << 'EOF'
@@ -1067,11 +1101,7 @@ test_primary_services() {
     systemctl enable samba-ad-dc 2>/dev/null || true
     systemctl restart samba-ad-dc 2>>"$LOG_FILE"
     
-    if [ $? -eq 0 ]; then
-        success "Serviço samba-ad-dc iniciado"
-    else
-        error "Falha ao iniciar samba-ad-dc"
-    fi
+    [ $? -eq 0 ] && success "Serviço samba-ad-dc iniciado" || error "Falha ao iniciar samba-ad-dc"
     
     log "Aguardando serviços iniciarem..."
     sleep 10
@@ -1083,19 +1113,11 @@ test_primary_services() {
     else
         warning "Kerberos com problemas - tentando novamente..."
         sleep 5
-        if echo "${ADMIN_PASSWORD}" | kinit ${ADMIN_USER}@${DOMAIN} 2>/dev/null; then
-            success "Kerberos funcionando (segunda tentativa)"
-        else
-            warning "Kerberos ainda com problemas"
-        fi
+        echo "${ADMIN_PASSWORD}" | kinit ${ADMIN_USER}@${DOMAIN} 2>/dev/null && success "Kerberos funcionando (segunda tentativa)" || warning "Kerberos ainda com problemas"
     fi
     
     log "Testando DNS..."
-    if host ${DOMAIN,,} 127.0.0.1 &> /dev/null; then
-        success "DNS do domínio funcionando"
-    else
-        warning "DNS do domínio com problemas"
-    fi
+    host ${DOMAIN,,} 127.0.0.1 &> /dev/null && success "DNS do domínio funcionando" || warning "DNS do domínio com problemas"
 }
 
 final_tests_primary() {
@@ -1120,8 +1142,21 @@ final_tests_primary() {
     echo ""
 }
 
+install_primary() {
+    log "Iniciando instalação do CONTROLADOR PRIMÁRIO"
+    
+    common_setup
+    provision_domain
+    configure_samba_primary
+    configure_kerberos_primary
+    test_primary_services
+    final_tests_primary
+    create_fix_dns_script
+    save_info
+}
+
 # ============================================
-# INSTALAÇÃO SECUNDÁRIA
+# MÓDULO 10: INSTALAÇÃO SECUNDÁRIA
 # ============================================
 
 remove_dhcp() {
@@ -1132,46 +1167,6 @@ remove_dhcp() {
     
     update_netplan "${FIXED_IP}" "24" "${FIXED_GATEWAY}" "${PRIMARY_DC_IP}" "8.8.8.8" "${DOMAIN,,}"
     apply_netplan
-}
-
-configure_dns_secondary() {
-    header "CONFIGURANDO DNS"
-    
-    log "Configurando /etc/resolv.conf..."
-    chattr -i /etc/resolv.conf 2>/dev/null || true
-    rm -f /etc/resolv.conf
-    
-    cat > /etc/resolv.conf << EOF
-nameserver ${PRIMARY_DC_IP}
-nameserver 8.8.8.8
-search ${DOMAIN,,}
-domain ${DOMAIN,,}
-EOF
-    chattr +i /etc/resolv.conf 2>/dev/null || true
-    
-    cat > /etc/hosts << EOF
-127.0.0.1 localhost
-127.0.1.1 ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
-${FIXED_IP} ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
-${FIXED_IP} ${HOSTNAME}
-${PRIMARY_DC_IP} ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,} ${PRIMARY_DC_HOSTNAME}
-EOF
-    
-    success "DNS e hosts configurados"
-}
-
-sync_time() {
-    header "SINCRONIZANDO HORA"
-    
-    log "Sincronizando com o primário..."
-    apt install -y ntpdate 2>/dev/null || true
-    
-    if ntpdate -u ${PRIMARY_DC_IP} 2>/dev/null; then
-        success "Hora sincronizada com o primário"
-    else
-        ntpdate -u pool.ntp.br 2>/dev/null || true
-        info "Hora sincronizada via internet"
-    fi
 }
 
 configure_kerberos_secondary() {
@@ -1206,16 +1201,10 @@ test_connection() {
     
     log "Testando conexão com o primário..."
     
-    if ping -c 3 ${PRIMARY_DC_IP} &> /dev/null; then
-        success "Primário acessível"
-    else
-        error "Primário não acessível - verifique o IP ${PRIMARY_DC_IP}"
-    fi
+    ping -c 3 ${PRIMARY_DC_IP} &> /dev/null && success "Primário acessível" || error "Primário não acessível - verifique o IP ${PRIMARY_DC_IP}"
     
     for porta in 445 389 88 53; do
-        if nc -zv ${PRIMARY_DC_IP} $porta 2>/dev/null; then
-            success "Porta $porta acessível"
-        fi
+        nc -zv ${PRIMARY_DC_IP} $porta 2>/dev/null && success "Porta $porta acessível"
     done
 }
 
@@ -1266,12 +1255,7 @@ join_domain() {
         --option="bind interfaces only=yes" \
         >>"$LOG_FILE" 2>&1
     
-    if [ $? -eq 0 ]; then
-        success "Join realizado com sucesso!"
-        return 0
-    fi
-    
-    error "Falha no join. Verifique o log: $LOG_FILE"
+    [ $? -eq 0 ] && success "Join realizado com sucesso!" || error "Falha no join. Verifique o log: $LOG_FILE"
 }
 
 configure_samba_secondary() {
@@ -1332,8 +1316,24 @@ verify_secondary() {
     samba-tool drs showrepl 2>/dev/null | head -5 || echo "  Aguardando replicação..."
 }
 
+install_secondary() {
+    log "Iniciando instalação do CONTROLADOR SECUNDÁRIO"
+    
+    remove_dhcp
+    common_setup
+    sync_time
+    configure_kerberos_secondary
+    test_connection
+    test_kerberos_secondary
+    join_domain
+    configure_samba_secondary
+    verify_secondary
+    create_fix_dns_script
+    save_info
+}
+
 # ============================================
-# SCRIPTS AUXILIARES
+# MÓDULO 11: SCRIPTS AUXILIARES E FINALIZAÇÃO
 # ============================================
 
 create_fix_dns_script() {
@@ -1398,27 +1398,39 @@ EOF
     success "Informações salvas em /root/ad_info.txt"
 }
 
-# ============================================
-# FUNÇÃO COMUM DE SETUP
-# ============================================
-
-common_setup() {
-    log "Executando configurações comuns..."
+finalize_installation() {
+    clear
+    header "✅ INSTALAÇÃO CONCLUÍDA!"
     
-    if [ "$INSTALLATION_TYPE" == "secondary" ]; then
-        configure_dns_secondary
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}         CONTROLADOR DE DOMÍNIO INSTALADO COM SUCESSO!           ${NC}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${YELLOW}📌 ACESSO:${NC}"
+    echo -e "  Domínio: ${BLUE}${DOMAIN}${NC}"
+    echo -e "  Usuário: ${BLUE}${ADMIN_USER}@${DOMAIN}${NC}"
+    echo -e "  Senha:   ${BLUE}${ADMIN_PASSWORD}${NC}"
+    echo -e "  IP:      ${BLUE}${FIXED_IP}${NC}"
+    echo ""
+    echo -e "${YELLOW}📁 ARQUIVOS:${NC}"
+    echo -e "  ${BLUE}/root/ad_info.txt${NC} - Informações completas"
+    echo -e "  ${BLUE}${LOG_FILE}${NC} - Log da instalação"
+    echo ""
+    
+    echo -e "${YELLOW}⚠️  Recomenda-se reiniciar o servidor.${NC}"
+    read -p "Reiniciar agora? (s/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Ss]$ ]]; then
+        log "Reiniciando..."
+        sleep 5
+        reboot
     else
-        fix_system_dns
+        log "Lembre-se de reiniciar depois."
     fi
-    
-    configure_locale
-    configure_ntp
-    install_packages
-    configure_hostname
 }
 
 # ============================================
-# MENU PRINCIPAL
+# MÓDULO 12: MENU PRINCIPAL E MAIN
 # ============================================
 
 show_menu() {
@@ -1479,29 +1491,12 @@ get_installation_type() {
     while true; do
         read -p "👉 Escolha uma opção [1-5]: " choice
         case $choice in
-            1)
-                configure_network
-                return 0
-                ;;
-            2)
-                INSTALLATION_TYPE="primary"
-                break
-                ;;
-            3)
-                INSTALLATION_TYPE="secondary"
-                break
-                ;;
-            4)
-                add_network_device
-                return 0
-                ;;
-            5)
-                echo -e "${YELLOW}Instalação cancelada.${NC}"
-                exit 0
-                ;;
-            *)
-                echo -e "${RED}Opção inválida! Tente novamente.${NC}"
-                ;;
+            1) configure_network_menu; return 0 ;;
+            2) INSTALLATION_TYPE="primary"; break ;;
+            3) INSTALLATION_TYPE="secondary"; break ;;
+            4) add_network_device; return 0 ;;
+            5) echo -e "${YELLOW}Instalação cancelada.${NC}"; exit 0 ;;
+            *) echo -e "${RED}Opção inválida! Tente novamente.${NC}" ;;
         esac
     done
     
@@ -1519,75 +1514,7 @@ get_installation_type() {
 }
 
 # ============================================
-# FUNÇÃO DE FINALIZAÇÃO
-# ============================================
-
-finalize_installation() {
-    clear
-    header "✅ INSTALAÇÃO CONCLUÍDA!"
-    
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}         CONTROLADOR DE DOMÍNIO INSTALADO COM SUCESSO!           ${NC}"
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    echo -e "${YELLOW}📌 ACESSO:${NC}"
-    echo -e "  Domínio: ${BLUE}${DOMAIN}${NC}"
-    echo -e "  Usuário: ${BLUE}${ADMIN_USER}@${DOMAIN}${NC}"
-    echo -e "  Senha:   ${BLUE}${ADMIN_PASSWORD}${NC}"
-    echo -e "  IP:      ${BLUE}${FIXED_IP}${NC}"
-    echo ""
-    echo -e "${YELLOW}📁 ARQUIVOS:${NC}"
-    echo -e "  ${BLUE}/root/ad_info.txt${NC} - Informações completas"
-    echo -e "  ${BLUE}${LOG_FILE}${NC} - Log da instalação"
-    echo ""
-    
-    echo -e "${YELLOW}⚠️  Recomenda-se reiniciar o servidor.${NC}"
-    read -p "Reiniciar agora? (s/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Ss]$ ]]; then
-        log "Reiniciando..."
-        sleep 5
-        reboot
-    else
-        log "Lembre-se de reiniciar depois."
-    fi
-}
-
-# ============================================
-# FUNÇÃO PRINCIPAL DE INSTALAÇÃO
-# ============================================
-
-install_primary() {
-    log "Iniciando instalação do CONTROLADOR PRIMÁRIO"
-    
-    common_setup
-    provision_domain
-    configure_samba_primary
-    configure_kerberos_primary
-    test_primary_services
-    final_tests_primary
-    create_fix_dns_script
-    save_info
-}
-
-install_secondary() {
-    log "Iniciando instalação do CONTROLADOR SECUNDÁRIO"
-    
-    remove_dhcp
-    common_setup
-    sync_time
-    configure_kerberos_secondary
-    test_connection
-    test_kerberos_secondary
-    join_domain
-    configure_samba_secondary
-    verify_secondary
-    create_fix_dns_script
-    save_info
-}
-
-# ============================================
-# INÍCIO DO SCRIPT - MAIN
+# MAIN
 # ============================================
 
 if [[ $EUID -ne 0 ]]; then
