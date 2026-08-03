@@ -1,0 +1,18 @@
+📋 Índice dos Blocos:
+Bloco	Descrição	Linhas
+1	Cores e Configurações Globais	    1-50
+2	Funções de Log e Utilitários	    52-120
+3	Detecção de Sistema	              122-200
+4	Detecção de SSH	                  202-215
+5	Gerenciamento de Rede (Netplan)	  217-350
+6	Configurações de Rede (Menu)	    352-500
+7	Configurações Básicas do Sistema  502-700
+8	Instalação Primária	              702-850
+9	Instalação Secundária	            852-1000
+10	Configurações Adicionais	      1002-1150
+11	Scripts Auxiliares	            1152-1250
+12	Coleta de Configurações	        1252-1350
+13	Menu Principal	                1352-1450
+14	Get Installation Type	          1452-1500
+15	Main	                          1502-1520
+Agora fica muito mais fácil encontrar e modificar qualquer parte do script! 🎯
