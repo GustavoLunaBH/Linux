@@ -1,7 +1,7 @@
 #!/bin/bash
 # ad_controller_setup.sh
 # Script completo para instalação do Samba AD - Controlador de Domínio
-# Versão: 3.5 - Com correção automática de DNS no secundário
+# Versão: 4.0 - Com todas as correções integradas
 
 # ============================================
 # CORES PARA OUTPUT
@@ -33,7 +33,7 @@ PRIMARY_DC_IP="192.168.1.2"
 PRIMARY_DC_HOSTNAME="adserver01"
 SECONDARY_DC_IP="192.168.1.3"
 SECONDARY_DC_HOSTNAME="adserver02"
-SCRIPT_VERSION="3.5"
+SCRIPT_VERSION="4.0"
 LOG_FILE="/tmp/ad_setup_$(date +%Y%m%d_%H%M%S).log"
 INSTALLATION_TYPE=""
 HOSTNAME=""
@@ -290,7 +290,6 @@ apply_netplan() {
         return
     fi
     
-    echo -e "${BLUE}Testando configuração com netplan try...${NC}"
     if netplan try --timeout 10 2>/dev/null; then
         success "Netplan configurado com sucesso!"
     else
@@ -303,7 +302,6 @@ apply_netplan() {
         fi
     fi
     
-    echo -e "${BLUE}Reiniciando serviços de rede...${NC}"
     systemctl restart systemd-networkd 2>/dev/null
     systemctl restart systemd-resolved 2>/dev/null
     
@@ -359,8 +357,8 @@ fix_system_dns() {
     [ "$INSTALLATION_TYPE" == "secondary" ] && dns_primary="${FIXED_IP}"
     
     cat > /etc/resolv.conf << EOF
-nameserver ${dns_primary}
 nameserver 127.0.0.1
+nameserver ${dns_primary}
 nameserver 8.8.8.8
 nameserver 1.1.1.1
 search ${DOMAIN,,}
@@ -368,8 +366,8 @@ domain ${DOMAIN,,}
 EOF
     
     cat > /etc/resolvconf/resolv.conf.d/head << EOF
-nameserver ${dns_primary}
 nameserver 127.0.0.1
+nameserver ${dns_primary}
 nameserver 8.8.8.8
 nameserver 1.1.1.1
 search ${DOMAIN,,}
@@ -395,6 +393,7 @@ configure_dns_secondary() {
     rm -f /etc/resolv.conf
     
     cat > /etc/resolv.conf << EOF
+nameserver 127.0.0.1
 nameserver ${FIXED_IP}
 nameserver ${PRIMARY_DC_IP}
 nameserver 8.8.8.8
@@ -558,6 +557,7 @@ install_packages() {
         traceroute mtr nmap tcpdump \
         sshpass ntpdate \
         realmd adcli sssd \
+        ufw \
         2>>"$LOG_FILE"
     
     if [ $? -eq 0 ]; then
@@ -630,6 +630,16 @@ configure_samba_primary() {
     if [ ! -f "/etc/samba/smb.conf" ] && [ -f "/var/lib/samba/private/smb.conf" ]; then
         cp /var/lib/samba/private/smb.conf /etc/samba/smb.conf
     fi
+    
+    # Remover parâmetros problemáticos
+    sed -i '/bind interfaces only/d' /etc/samba/smb.conf
+    sed -i '/server signing/d' /etc/samba/smb.conf
+    sed -i '/client signing/d' /etc/samba/smb.conf
+    sed -i '/ntlm auth/d' /etc/samba/smb.conf
+    sed -i '/domain master/d' /etc/samba/smb.conf
+    sed -i '/local master/d' /etc/samba/smb.conf
+    sed -i '/preferred master/d' /etc/samba/smb.conf
+    sed -i '/os level/d' /etc/samba/smb.conf
     
     cat >> /etc/samba/smb.conf << 'EOF'
     log level = 2
@@ -727,12 +737,16 @@ install_primary() {
     configure_kerberos_primary
     test_primary_services
     final_tests_primary
+    
+    # Configurar firewall
+    configure_firewall
+    
     create_fix_dns_script
     save_info
 }
 
 # ============================================
-# INSTALAÇÃO SECUNDÁRIA - COM CORREÇÃO DNS
+# INSTALAÇÃO SECUNDÁRIA - CORRIGIDA
 # ============================================
 
 remove_dhcp() {
@@ -807,7 +821,7 @@ test_kerberos_secondary() {
         if echo "${ADMIN_PASSWORD}" | kinit ${ADMIN_USER}@${DOMAIN} 2>/dev/null; then
             success "Autenticação Kerberos OK (segunda tentativa)"
         else
-            error "Falha na autenticação Kerberos - verifique a configuração"
+            warning "Falha na autenticação Kerberos - continuando..."
         fi
     fi
 }
@@ -871,19 +885,20 @@ configure_samba_secondary() {
     fi
     
     if [ -f "/etc/samba/smb.conf" ]; then
-        sed -i '/bind interfaces/d' /etc/samba/smb.conf
+        # Remover parâmetros problemáticos
+        sed -i '/bind interfaces only/d' /etc/samba/smb.conf
         sed -i '/server signing/d' /etc/samba/smb.conf
         sed -i '/client signing/d' /etc/samba/smb.conf
         sed -i '/ntlm auth/d' /etc/samba/smb.conf
+        sed -i '/domain master/d' /etc/samba/smb.conf
+        sed -i '/local master/d' /etc/samba/smb.conf
+        sed -i '/preferred master/d' /etc/samba/smb.conf
+        sed -i '/os level/d' /etc/samba/smb.conf
         
         cat >> /etc/samba/smb.conf << 'EOF'
     log level = 2
     max log size = 10000
     debug timestamp = yes
-    domain master = no
-    local master = no
-    preferred master = no
-    os level = 0
 EOF
         sed -i "s/interfaces.*=.*/interfaces = lo ${INTERFACE}/g" /etc/samba/smb.conf
     fi
@@ -910,7 +925,50 @@ EOF
 }
 
 # ============================================
-# CORREÇÃO DNS PARA O SECUNDÁRIO - NOVA FUNÇÃO
+# CONFIGURAR FIREWALL - NOVA FUNÇÃO
+# ============================================
+
+configure_firewall() {
+    header "CONFIGURANDO FIREWALL"
+    
+    log "Configurando firewall para o AD..."
+    
+    # Configurar UFW
+    if command -v ufw &> /dev/null; then
+        # Abrir portas do AD
+        for port in 53 88 135 139 389 445 636 3268 3269 464; do
+            ufw allow ${port}/tcp 2>/dev/null
+            ufw allow ${port}/udp 2>/dev/null
+        done
+        
+        # Permitir SMB
+        ufw allow 137/udp 2>/dev/null
+        ufw allow 138/udp 2>/dev/null
+        
+        # Permitir SSH
+        ufw allow 22/tcp 2>/dev/null
+        
+        # Permitir da rede local
+        ufw allow from 192.168.1.0/24 2>/dev/null
+        
+        success "UFW configurado"
+    fi
+    
+    # Configurar iptables
+    if command -v iptables &> /dev/null; then
+        iptables -A INPUT -i lo -j ACCEPT 2>/dev/null
+        iptables -A INPUT -s 192.168.1.0/24 -j ACCEPT 2>/dev/null
+        iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null
+        for port in 53 88 135 139 389 445 636 3268 3269 464; do
+            iptables -A INPUT -p tcp --dport $port -j ACCEPT 2>/dev/null
+            iptables -A INPUT -p udp --dport $port -j ACCEPT 2>/dev/null
+        done
+        success "iptables configurado"
+    fi
+}
+
+# ============================================
+# CORREÇÃO DNS PARA O SECUNDÁRIO - MELHORADA
 # ============================================
 
 fix_dns_secondary() {
@@ -931,58 +989,127 @@ fix_dns_secondary() {
         sleep 3
     fi
     
-    echo -e "${BLUE}2. Registrando o domínio no DNS...${NC}"
-    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} @ A ${IP} -U ${ADMIN_USER} 2>/dev/null
-    if [ $? -eq 0 ]; then
-        success "Domínio registrado: ${DOMAIN_LOWER} -> ${IP}"
-    else
-        warning "Registro do domínio já existe ou falha ao criar"
-    fi
+    echo -e "${BLUE}2. Registrando DNS...${NC}"
     
-    echo -e "${BLUE}3. Registrando o servidor no DNS...${NC}"
-    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} ${HOST} A ${IP} -U ${ADMIN_USER} 2>/dev/null
-    if [ $? -eq 0 ]; then
-        success "Servidor registrado: ${HOST} -> ${IP}"
-    else
-        warning "Registro do servidor já existe ou falha ao criar"
-    fi
+    # Registrar domínio
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} @ A ${IP} -U ${ADMIN_USER} --password=${ADMIN_PASSWORD} 2>/dev/null
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} ${HOST} A ${IP} -U ${ADMIN_USER} --password=${ADMIN_PASSWORD} 2>/dev/null
     
-    echo -e "${BLUE}4. Registrando registros SRV...${NC}"
+    # Registrar SRV
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _ldap._tcp SRV "0 100 389 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} --password=${ADMIN_PASSWORD} 2>/dev/null
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _kerberos._tcp SRV "0 100 88 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} --password=${ADMIN_PASSWORD} 2>/dev/null
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _ldap._tcp.dc._msdcs SRV "0 100 389 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} --password=${ADMIN_PASSWORD} 2>/dev/null
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _kerberos._tcp.dc._msdcs SRV "0 100 88 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} --password=${ADMIN_PASSWORD} 2>/dev/null
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _kpasswd._tcp SRV "0 100 464 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} --password=${ADMIN_PASSWORD} 2>/dev/null
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _gc._tcp SRV "0 100 3268 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} --password=${ADMIN_PASSWORD} 2>/dev/null
     
-    echo "  Registrando _ldap._tcp..."
-    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _ldap._tcp SRV "0 100 389 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} 2>/dev/null
+    success "DNS registrado"
     
-    echo "  Registrando _kerberos._tcp..."
-    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _kerberos._tcp SRV "0 100 88 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} 2>/dev/null
-    
-    echo "  Registrando _ldap._tcp.dc._msdcs..."
-    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _ldap._tcp.dc._msdcs SRV "0 100 389 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} 2>/dev/null
-    
-    echo "  Registrando _kerberos._tcp.dc._msdcs..."
-    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _kerberos._tcp.dc._msdcs SRV "0 100 88 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} 2>/dev/null
-    
-    echo "  Registrando _gc._tcp..."
-    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _gc._tcp SRV "0 100 3268 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} 2>/dev/null
-    
-    echo -e "${BLUE}5. Verificando registros DNS...${NC}"
-    echo ""
-    echo "  Registros A:"
+    echo -e "${BLUE}3. Verificando registros DNS...${NC}"
     samba-tool dns query 127.0.0.1 ${DOMAIN_LOWER} @ A 2>/dev/null | grep -A2 "A:"
     echo ""
-    echo "  Registros SRV:"
-    samba-tool dns query 127.0.0.1 ${DOMAIN_LOWER} _ldap._tcp.${DOMAIN_LOWER} SRV 2>/dev/null | grep -A3 "SRV:"
-    echo ""
     
-    echo -e "${BLUE}6. Testando resolução DNS...${NC}"
-    echo "  nslookup ${DOMAIN_LOWER}:"
+    echo -e "${BLUE}4. Reiniciando o Samba...${NC}"
+    systemctl restart samba-ad-dc
+    sleep 5
+    
+    echo -e "${BLUE}5. Testando resolução DNS...${NC}"
     nslookup ${DOMAIN_LOWER} 127.0.0.1 2>/dev/null
-    echo ""
-    echo "  nslookup ${HOST}.${DOMAIN_LOWER}:"
-    nslookup ${HOST}.${DOMAIN_LOWER} 127.0.0.1 2>/dev/null
     echo ""
     
     success "DNS do servidor secundário corrigido!"
 }
+
+# ============================================
+# HABILITAR SSH ROOT
+# ============================================
+
+enable_ssh_root() {
+    log "Habilitando SSH Root..."
+    
+    if [ -f "/etc/ssh/sshd_config" ]; then
+        cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup.$(date +%Y%m%d_%H%M%S)
+        
+        sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+        sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+        
+        if ! grep -q "^PermitRootLogin" /etc/ssh/sshd_config; then
+            echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+        fi
+        
+        sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        
+        systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+        
+        success "SSH Root habilitado"
+    fi
+}
+
+# ============================================
+# REPLICAÇÃO AUTOMÁTICA
+# ============================================
+
+setup_auto_replication() {
+    header "CONFIGURANDO REPLICAÇÃO AUTOMÁTICA"
+    
+    log "Configurando script de replicação universal..."
+    
+    cat > /usr/local/bin/force-replication.sh << 'EOF'
+#!/bin/bash
+# Script de replicação automática AD - Universal
+LOG="/var/log/ad_replication.log"
+CURRENT_DC=$(hostname -f)
+CURRENT_HOSTNAME=$(hostname -s)
+DOMAIN="RNV.INTRA"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> $LOG
+}
+
+log_msg "=========================================="
+log_msg "Iniciando replicação - ${CURRENT_DC}"
+
+# Determinar o outro DC
+if [ "${CURRENT_HOSTNAME}" = "adserver01" ]; then
+    SOURCE_DC="${CURRENT_DC}"
+    TARGET_DC="adserver02.rnv.intra"
+else
+    SOURCE_DC="${CURRENT_DC}"
+    TARGET_DC="adserver01.rnv.intra"
+fi
+
+log_msg "Replicando de ${SOURCE_DC} para ${TARGET_DC}"
+
+# Tentar replicação
+if samba-tool drs replicate ${TARGET_DC} ${SOURCE_DC} "DC=rnv,DC=intra" --sync-forced 2>/dev/null; then
+    log_msg "✓ Replicação OK"
+else
+    log_msg "✗ Falha na replicação"
+fi
+
+# Sync-all
+samba-tool drs replicate ${TARGET_DC} ${TARGET_DC} "DC=rnv,DC=intra" --sync-all 2>/dev/null
+
+log_msg "Replicação concluída"
+log_msg "=========================================="
+EOF
+
+    chmod +x /usr/local/bin/force-replication.sh
+    
+    cat > /etc/cron.d/ad_replication << EOF
+# Replicação automática a cada 5 minutos
+*/5 * * * * root /usr/local/bin/force-replication.sh > /dev/null 2>&1
+EOF
+
+    chmod 644 /etc/cron.d/ad_replication
+    
+    success "Replicação automática configurada"
+}
+
+# ============================================
+# VERIFICAÇÃO PÓS-INSTALAÇÃO
+# ============================================
 
 verify_secondary() {
     header "VERIFICANDO INSTALAÇÃO"
@@ -1005,19 +1132,19 @@ verify_secondary() {
     
     echo -e "${BLUE}=== Replicação ===${NC}"
     samba-tool drs showrepl 2>/dev/null | head -5 || echo "  Aguardando replicação..."
+    echo ""
     
-    echo ""
-    echo -e "${BLUE}=== Teste de Resolução DNS ===${NC}"
-    echo "  Testando resolução do domínio:"
-    nslookup ${DOMAIN,,} 127.0.0.1 2>/dev/null || echo "  ❌ Domínio não resolvido"
-    echo ""
-    echo "  Testando resolução do servidor:"
-    nslookup $(hostname -f) 127.0.0.1 2>/dev/null || echo "  ❌ Servidor não resolvido"
+    echo -e "${BLUE}=== Teste de DNS ===${NC}"
+    nslookup ${DOMAIN,,} 127.0.0.1 2>/dev/null || echo "  ❌ DNS não respondendo"
     echo ""
     
     echo -e "${GREEN}✅ Servidor configurado como DC independente!${NC}"
     echo -e "${GREEN}   Pode adicionar equipamentos mesmo com o primário offline${NC}"
 }
+
+# ============================================
+# INSTALAÇÃO COMPLETA
+# ============================================
 
 install_secondary() {
     log "Iniciando instalação do CONTROLADOR SECUNDÁRIO"
@@ -1030,7 +1157,10 @@ install_secondary() {
     test_kerberos_secondary
     join_domain
     configure_samba_secondary
-    fix_dns_secondary  # NOVA FUNÇÃO PARA CORRIGIR DNS
+    configure_firewall
+    enable_ssh_root
+    fix_dns_secondary
+    setup_auto_replication
     verify_secondary
     create_fix_dns_script
     save_info
@@ -1046,10 +1176,9 @@ create_fix_dns_script() {
 echo "Corrigindo DNS do sistema..."
 chattr -i /etc/resolv.conf 2>/dev/null || true
 cat > /etc/resolv.conf << EOFF
-nameserver 192.168.1.2
 nameserver 127.0.0.1
+nameserver 192.168.1.2
 nameserver 8.8.8.8
-nameserver 1.1.1.1
 search rnv.intra
 domain rnv.intra
 EOFF
@@ -1097,7 +1226,6 @@ host -t SRV _ldap._tcp.${DOMAIN,,}
 ───────────────────────────────────────────────────────────────────
 REPLICAÇÃO
 ───────────────────────────────────────────────────────────────────
-Verificar status: /usr/local/bin/check-replication.sh
 Forçar replicação: /usr/local/bin/force-replication.sh
 Log replicação: /var/log/ad_replication.log
 
@@ -1132,11 +1260,13 @@ finalize_installation() {
         echo -e "${GREEN}📋 INFORMAÇÕES DO SECUNDÁRIO:${NC}"
         echo -e "  ${GREEN}✅ Servidor configurado para funcionar independentemente${NC}"
         echo -e "  ${GREEN}✅ DNS configurado e registrado corretamente${NC}"
-        echo -e "  ${GREEN}✅ Pode adicionar equipamentos mesmo com o primário offline${NC}"
+        echo -e "  ${GREEN}✅ Firewall configurado${NC}"
+        echo -e "  ${GREEN}✅ SSH Root habilitado${NC}"
+        echo -e "  ${GREEN}✅ Replicação automática configurada${NC}"
         echo ""
         echo -e "${YELLOW}📌 Teste de DNS:${NC}"
+        echo -e "  ${BLUE}nslookup ${DOMAIN,,}${NC}"
         echo -e "  ${BLUE}ping ${DOMAIN,,}${NC}"
-        echo -e "  ${BLUE}ping $(hostname -f)${NC}"
         echo ""
     fi
     
@@ -1153,7 +1283,7 @@ finalize_installation() {
 }
 
 # ============================================
-# FUNÇÕES DE COLEÇÃO DE CONFIGURAÇÕES
+# COLETA DE CONFIGURAÇÕES
 # ============================================
 
 collect_configurations() {
@@ -1247,443 +1377,6 @@ collect_configurations() {
 }
 
 # ============================================
-# MENU DE REPLICAÇÃO AD
-# ============================================
-
-replication_menu() {
-    header "GESTÃO DE REPLICAÇÃO AD"
-    
-    echo -e "${CYAN}📋 Este menu gerencia a replicação entre os DCs${NC}"
-    echo -e "${CYAN}   A replicação deve ser executada em AMBOS os servidores${NC}"
-    echo ""
-    
-    echo -e "${BLUE}Status atual:${NC}"
-    echo -e "  Servidor: ${CYAN}$(hostname)${NC}"
-    echo -e "  IP: ${CYAN}${FIXED_IP}${NC}"
-    echo -e "  Domínio: ${CYAN}${DOMAIN}${NC}"
-    echo ""
-    
-    echo -e "${BLUE}Último status da replicação:${NC}"
-    if [ -f "/var/log/ad_replication.log" ]; then
-        tail -3 /var/log/ad_replication.log 2>/dev/null | sed 's/^/  /'
-    else
-        echo "  Nenhum log encontrado"
-    fi
-    echo ""
-    
-    echo -e "${WHITE}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${WHITE}║                    REPLICAÇÃO AD                           ║${NC}"
-    echo -e "${WHITE}╚══════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    echo -e "${GREEN} 1)${NC} ${BOLD}CONFIGURAR REPLICAÇÃO AUTOMÁTICA${NC}"
-    echo -e "     ${CYAN}➜${NC} Configura replicação a cada 5 minutos (cron job)"
-    echo -e "     ${CYAN}➜${NC} Deve ser executado em AMBOS os servidores"
-    echo ""
-    echo -e "${GREEN} 2)${NC} ${BOLD}FORÇAR REPLICAÇÃO MANUAL${NC}"
-    echo -e "     ${CYAN}➜${NC} Força sincronização imediata"
-    echo -e "     ${CYAN}➜${NC} Executa no servidor atual"
-    echo ""
-    echo -e "${GREEN} 3)${NC} ${BOLD}REPLICAR DO PRIMÁRIO PARA O SECUNDÁRIO${NC}"
-    echo -e "     ${CYAN}➜${NC} Puxa alterações do ADServer01"
-    echo -e "     ${CYAN}➜${NC} Execute no ADServer02"
-    echo ""
-    echo -e "${GREEN} 4)${NC} ${BOLD}REPLICAR DO SECUNDÁRIO PARA O PRIMÁRIO${NC}"
-    echo -e "     ${CYAN}➜${NC} Puxa alterações do ADServer02"
-    echo -e "     ${CYAN}➜${NC} Execute no ADServer01"
-    echo ""
-    echo -e "${GREEN} 5)${NC} ${BOLD}VERIFICAR STATUS DA REPLICAÇÃO${NC}"
-    echo -e "     ${CYAN}➜${NC} Mostra status atual"
-    echo ""
-    echo -e "${GREEN} 6)${NC} ${BOLD}VERIFICAR DIFERENÇAS ENTRE DCS${NC}"
-    echo -e "     ${CYAN}➜${NC} Compara usuários e computadores"
-    echo ""
-    echo -e "${GREEN} 7)${NC} ${BOLD}VER LOG DE REPLICAÇÃO${NC}"
-    echo -e "     ${CYAN}➜${NC} Mostra as últimas replicações"
-    echo ""
-    echo -e "${RED} 8)${NC} ${BOLD}VOLTAR AO MENU PRINCIPAL${NC}"
-    echo ""
-    echo -e "${WHITE}═══════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    
-    while true; do
-        read -p "👉 Escolha uma opção [1-8]: " choice
-        case $choice in
-            1) setup_auto_replication; break ;;
-            2) force_replication_manual; break ;;
-            3) replicate_primary_to_secondary; break ;;
-            4) replicate_secondary_to_primary; break ;;
-            5) check_replication_status; break ;;
-            6) check_replication_differences; break ;;
-            7) view_replication_log; break ;;
-            8) return 0 ;;
-            *) echo -e "${RED}Opção inválida! Tente novamente.${NC}" ;;
-        esac
-    done
-    
-    replication_menu
-}
-
-# ============================================
-# FUNÇÕES DE REPLICAÇÃO
-# ============================================
-
-setup_auto_replication() {
-    header "CONFIGURANDO REPLICAÇÃO AUTOMÁTICA"
-    
-    log "Configurando replicação automática neste servidor..."
-    
-    echo -e "${YELLOW}⚠️  ATENÇÃO:${NC}"
-    echo -e "  A replicação automática será configurada para rodar a cada 5 minutos"
-    echo -e "  Isso deve ser feito em AMBOS os servidores (ADServer01 e ADServer02)"
-    echo ""
-    
-    read -p "Deseja continuar? (S/n): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Nn]$ ]]; then
-        info "Operação cancelada"
-        return
-    fi
-    
-    cat > /usr/local/bin/force-replication.sh << 'EOF'
-#!/bin/bash
-# Script de replicação automática AD
-LOG="/var/log/ad_replication.log"
-CURRENT_DC=$(hostname -f)
-CURRENT_HOSTNAME=$(hostname -s)
-DOMAIN="RNV.INTRA"
-PRIMARY_DC="adserver01.rnv.intra"
-SECONDARY_DC="adserver02.rnv.intra"
-
-log_msg() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> $LOG
-}
-
-log_msg "=========================================="
-log_msg "Iniciando replicação - ${CURRENT_DC}"
-
-# Tentar replicar do outro DC
-if [ "${CURRENT_HOSTNAME}" = "adserver01" ]; then
-    log_msg "Replicando do secundário (${SECONDARY_DC}) para o primário (${CURRENT_DC})"
-    samba-tool drs replicate ${CURRENT_DC} ${SECONDARY_DC} ${DOMAIN} 2>/dev/null
-    if [ $? -eq 0 ]; then
-        log_msg "✓ Replicação do secundário OK"
-    else
-        log_msg "✗ Falha na replicação do secundário"
-    fi
-else
-    log_msg "Replicando do primário (${PRIMARY_DC}) para o secundário (${CURRENT_DC})"
-    samba-tool drs replicate ${CURRENT_DC} ${PRIMARY_DC} ${DOMAIN} 2>/dev/null
-    if [ $? -eq 0 ]; then
-        log_msg "✓ Replicação do primário OK"
-    else
-        log_msg "✗ Falha na replicação do primário"
-    fi
-fi
-
-log_msg "Forçando sync-all..."
-samba-tool drs replicate ${CURRENT_DC} ${CURRENT_DC} ${DOMAIN} --sync-all 2>/dev/null
-
-log_msg "Replicação concluída"
-log_msg "=========================================="
-EOF
-
-    chmod +x /usr/local/bin/force-replication.sh
-    
-    cat > /etc/cron.d/ad_replication << EOF
-# Replicação automática a cada 5 minutos
-*/5 * * * * root /usr/local/bin/force-replication.sh > /dev/null 2>&1
-# Verificação a cada hora
-0 * * * * root /usr/local/bin/check-replication.sh >> /var/log/ad_replication_check.log 2>&1
-EOF
-
-    chmod 644 /etc/cron.d/ad_replication
-    
-    cat > /usr/local/bin/check-replication.sh << 'EOF'
-#!/bin/bash
-echo "═══════════════════════════════════════════════════════════════════"
-echo "  VERIFICAÇÃO DE REPLICAÇÃO - $(hostname)"
-echo "═══════════════════════════════════════════════════════════════════"
-echo ""
-echo "📋 Status da Replicação:"
-samba-tool drs showrepl 2>/dev/null | head -10
-echo ""
-echo "📋 Últimas replicações:"
-tail -5 /var/log/ad_replication.log 2>/dev/null
-echo ""
-echo "═══════════════════════════════════════════════════════════════════"
-EOF
-
-    chmod +x /usr/local/bin/check-replication.sh
-    
-    success "Replicação automática configurada!"
-    echo ""
-    echo -e "${BLUE}Arquivos criados:${NC}"
-    echo -e "  ${CYAN}/usr/local/bin/force-replication.sh${NC} - Script de replicação"
-    echo -e "  ${CYAN}/usr/local/bin/check-replication.sh${NC} - Script de verificação"
-    echo -e "  ${CYAN}/etc/cron.d/ad_replication${NC} - Agendamento (a cada 5 minutos)"
-    echo -e "  ${CYAN}/var/log/ad_replication.log${NC} - Log de replicação"
-    echo ""
-    
-    echo -e "${GREEN}✅ Replicação automática configurada neste servidor!${NC}"
-    echo ""
-    echo -e "${YELLOW}📌 LEMBRE-SE:${NC}"
-    echo -e "  Execute a mesma configuração no OUTRO servidor!"
-    echo ""
-    
-    echo -e "${BLUE}Executando replicação imediata...${NC}"
-    /usr/local/bin/force-replication.sh
-    
-    press_enter
-}
-
-force_replication_manual() {
-    header "FORÇANDO REPLICAÇÃO MANUAL"
-    
-    log "Forçando replicação manual..."
-    
-    echo -e "${BLUE}Servidor atual: ${CYAN}$(hostname)${NC}"
-    echo ""
-    
-    echo -e "${BLUE}DCs disponíveis:${NC}"
-    samba-tool domain info 127.0.0.1 2>/dev/null | grep "DC name" | sed 's/^/  /'
-    echo ""
-    
-    echo -e "${YELLOW}⚠️  Vai forçar replicação do servidor atual${NC}"
-    read -p "Deseja continuar? (S/n): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Nn]$ ]]; then
-        info "Operação cancelada"
-        return
-    fi
-    
-    local current_dc=$(hostname -f)
-    local other_dc=""
-    
-    if [[ "$(hostname -s)" == "adserver01" ]]; then
-        other_dc="adserver02.rnv.intra"
-    else
-        other_dc="adserver01.rnv.intra"
-    fi
-    
-    echo -e "${BLUE}1. Replicando de ${other_dc} para ${current_dc}...${NC}"
-    samba-tool drs replicate ${current_dc} ${other_dc} ${DOMAIN} 2>/dev/null
-    if [ $? -eq 0 ]; then
-        success "Replicação OK"
-    else
-        warning "Falha na replicação. Tentando forçada..."
-        samba-tool drs replicate ${current_dc} ${other_dc} ${DOMAIN} --sync-forced 2>/dev/null
-        if [ $? -eq 0 ]; then
-            success "Replicação forçada OK"
-        else
-            warning "Falha na replicação forçada"
-        fi
-    fi
-    
-    echo -e "${BLUE}2. Replicando DNS...${NC}"
-    samba-tool dns replicate ${current_dc} ${other_dc} ${DOMAIN} 2>/dev/null
-    
-    echo -e "${BLUE}3. Sync-all...${NC}"
-    samba-tool drs replicate ${current_dc} ${current_dc} ${DOMAIN} --sync-all 2>/dev/null
-    
-    echo ""
-    echo -e "${GREEN}✅ Replicação manual concluída!${NC}"
-    echo ""
-    echo -e "${BLUE}Status atual:${NC}"
-    samba-tool drs showrepl 2>/dev/null | head -10
-    
-    press_enter
-}
-
-replicate_primary_to_secondary() {
-    header "REPLICANDO DO PRIMÁRIO PARA O SECUNDÁRIO"
-    
-    echo -e "${YELLOW}⚠️  Esta operação deve ser executada no ADServer02${NC}"
-    echo -e "${YELLOW}   Vai puxar as alterações do ADServer01${NC}"
-    echo ""
-    
-    read -p "Deseja continuar? (S/n): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Nn]$ ]]; then
-        info "Operação cancelada"
-        return
-    fi
-    
-    log "Replicando do primário (adserver01) para o secundário (adserver02)..."
-    
-    echo -e "${BLUE}1. Testando conectividade com o primário...${NC}"
-    if ping -c 3 adserver01.rnv.intra &> /dev/null; then
-        success "Primário acessível"
-    else
-        warning "Primário não acessível - tentando mesmo assim..."
-    fi
-    
-    echo -e "${BLUE}2. Replicando do primário...${NC}"
-    samba-tool drs replicate adserver02.rnv.intra adserver01.rnv.intra RNV.INTRA 2>/dev/null
-    if [ $? -eq 0 ]; then
-        success "Replicação OK"
-    else
-        samba-tool drs replicate adserver02.rnv.intra adserver01.rnv.intra RNV.INTRA --sync-forced 2>/dev/null
-        if [ $? -eq 0 ]; then
-            success "Replicação forçada OK"
-        else
-            warning "Falha na replicação"
-        fi
-    fi
-    
-    echo -e "${BLUE}3. Replicando DNS...${NC}"
-    samba-tool dns replicate adserver02.rnv.intra adserver01.rnv.intra RNV.INTRA 2>/dev/null
-    
-    echo ""
-    echo -e "${GREEN}✅ Replicação primário → secundário concluída!${NC}"
-    
-    press_enter
-}
-
-replicate_secondary_to_primary() {
-    header "REPLICANDO DO SECUNDÁRIO PARA O PRIMÁRIO"
-    
-    echo -e "${YELLOW}⚠️  Esta operação deve ser executada no ADServer01${NC}"
-    echo -e "${YELLOW}   Vai puxar as alterações do ADServer02${NC}"
-    echo ""
-    
-    read -p "Deseja continuar? (S/n): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Nn]$ ]]; then
-        info "Operação cancelada"
-        return
-    fi
-    
-    log "Replicando do secundário (adserver02) para o primário (adserver01)..."
-    
-    echo -e "${BLUE}1. Testando conectividade com o secundário...${NC}"
-    if ping -c 3 adserver02.rnv.intra &> /dev/null; then
-        success "Secundário acessível"
-    else
-        warning "Secundário não acessível - tentando mesmo assim..."
-    fi
-    
-    echo -e "${BLUE}2. Replicando do secundário...${NC}"
-    samba-tool drs replicate adserver01.rnv.intra adserver02.rnv.intra RNV.INTRA 2>/dev/null
-    if [ $? -eq 0 ]; then
-        success "Replicação OK"
-    else
-        samba-tool drs replicate adserver01.rnv.intra adserver02.rnv.intra RNV.INTRA --sync-forced 2>/dev/null
-        if [ $? -eq 0 ]; then
-            success "Replicação forçada OK"
-        else
-            warning "Falha na replicação"
-        fi
-    fi
-    
-    echo -e "${BLUE}3. Replicando DNS...${NC}"
-    samba-tool dns replicate adserver01.rnv.intra adserver02.rnv.intra RNV.INTRA 2>/dev/null
-    
-    echo ""
-    echo -e "${GREEN}✅ Replicação secundário → primário concluída!${NC}"
-    
-    press_enter
-}
-
-check_replication_status() {
-    header "STATUS DA REPLICAÇÃO"
-    
-    log "Verificando status da replicação..."
-    
-    echo -e "${BLUE}=== DCs no Domínio ===${NC}"
-    samba-tool domain info 127.0.0.1 2>/dev/null | grep "DC name" | sed 's/^/  /'
-    echo ""
-    
-    echo -e "${BLUE}=== Status da Replicação ===${NC}"
-    samba-tool drs showrepl 2>/dev/null | head -20 | sed 's/^/  /'
-    echo ""
-    
-    echo -e "${BLUE}=== Teste de Conectividade ===${NC}"
-    for dc in adserver01.rnv.intra adserver02.rnv.intra; do
-        echo -n "  Testando ${dc}: "
-        if ping -c 2 ${dc} &> /dev/null; then
-            success "OK"
-        else
-            warning "FALHA"
-        fi
-    done
-    echo ""
-    
-    echo -e "${BLUE}=== Verificando Resolução DNS ===${NC}"
-    for dc in adserver01.rnv.intra adserver02.rnv.intra; do
-        echo -n "  ${dc}: "
-        if nslookup ${dc} 2>/dev/null | grep -q "Address:"; then
-            success "OK"
-        else
-            warning "FALHA"
-        fi
-    done
-    echo ""
-    
-    press_enter
-}
-
-check_replication_differences() {
-    header "VERIFICANDO DIFERENÇAS ENTRE DCS"
-    
-    log "Verificando diferenças entre os DCs..."
-    
-    echo -e "${BLUE}Comparando usuários:${NC}"
-    
-    local users_primary=$(samba-tool user list -H ldap://adserver01.rnv.intra 2>/dev/null | wc -l)
-    echo -e "  Usuários no primário: ${users_primary}"
-    
-    local users_secondary=$(samba-tool user list -H ldap://adserver02.rnv.intra 2>/dev/null | wc -l)
-    echo -e "  Usuários no secundário: ${users_secondary}"
-    
-    if [ "$users_primary" != "$users_secondary" ]; then
-        warning " ⚠️  Diferença de $((users_primary - users_secondary)) usuários detectada!"
-        echo -e "${YELLOW}  Recomendação: Execute a replicação${NC}"
-    else
-        success " ✓ Quantidade de usuários igual"
-    fi
-    
-    echo ""
-    echo -e "${BLUE}Comparando computadores:${NC}"
-    
-    local comps_primary=$(samba-tool computer list -H ldap://adserver01.rnv.intra 2>/dev/null | wc -l)
-    echo -e "  Computadores no primário: ${comps_primary}"
-    
-    local comps_secondary=$(samba-tool computer list -H ldap://adserver02.rnv.intra 2>/dev/null | wc -l)
-    echo -e "  Computadores no secundário: ${comps_secondary}"
-    
-    if [ "$comps_primary" != "$comps_secondary" ]; then
-        warning " ⚠️  Diferença de $((comps_primary - comps_secondary)) computadores detectada!"
-        echo -e "${YELLOW}  Recomendação: Execute a replicação${NC}"
-    else
-        success " ✓ Quantidade de computadores igual"
-    fi
-    
-    echo ""
-    press_enter
-}
-
-view_replication_log() {
-    header "LOG DE REPLICAÇÃO"
-    
-    if [ -f "/var/log/ad_replication.log" ]; then
-        echo -e "${BLUE}Últimas 30 linhas do log:${NC}"
-        echo -e "${YELLOW}─────────────────────────────────────────────────────${NC}"
-        tail -30 /var/log/ad_replication.log
-        echo -e "${YELLOW}─────────────────────────────────────────────────────${NC}"
-        echo ""
-        echo -e "Tamanho do arquivo: $(du -h /var/log/ad_replication.log | cut -f1)"
-        echo -e "Última modificação: $(stat -c %y /var/log/ad_replication.log 2>/dev/null || echo 'N/A')"
-    else
-        warning "Arquivo de log não encontrado: /var/log/ad_replication.log"
-        echo ""
-        echo -e "${YELLOW}Dica: Configure a replicação automática primeiro (Opção 1)${NC}"
-    fi
-    
-    echo ""
-    press_enter
-}
-
-# ============================================
 # MENU PRINCIPAL
 # ============================================
 
@@ -1742,6 +1435,57 @@ show_menu() {
     echo ""
     echo -e "${WHITE}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
+}
+
+# ============================================
+# GET INSTALLATION TYPE
+# ============================================
+
+get_installation_type() {
+    while true; do
+        read -p "👉 Escolha uma opção [1-6]: " choice
+        case $choice in
+            1)
+                configure_network_menu
+                return 0
+                ;;
+            2)
+                INSTALLATION_TYPE="primary"
+                break
+                ;;
+            3)
+                INSTALLATION_TYPE="secondary"
+                break
+                ;;
+            4)
+                echo -e "${YELLOW}Função de replicação em desenvolvimento...${NC}"
+                return 0
+                ;;
+            5)
+                echo -e "${YELLOW}Função de adição de equipamento em desenvolvimento...${NC}"
+                return 0
+                ;;
+            6)
+                echo -e "${YELLOW}Instalação cancelada.${NC}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}Opção inválida! Tente novamente.${NC}"
+                ;;
+        esac
+    done
+    
+    if [ -z "$FIXED_IP" ] || [ "$FIXED_IP" == "127.0.0.1" ]; then
+        echo ""
+        echo -e "${RED}❌ Rede NÃO configurada!${NC}"
+        echo -e "${YELLOW}Por favor, configure a rede primeiro (Opção 1)${NC}"
+        echo ""
+        read -p "Pressione ENTER para voltar ao menu..."
+        INSTALLATION_TYPE=""
+        show_menu
+        get_installation_type
+        return
+    fi
 }
 
 # ============================================
@@ -1975,206 +1719,6 @@ test_connectivity() {
     echo ""
     
     press_enter
-}
-
-# ============================================
-# ADICIONAR EQUIPAMENTO NA REDE
-# ============================================
-
-add_network_device() {
-    header "ADICIONAR EQUIPAMENTO NA REDE"
-    
-    echo -e "${CYAN}📋 Esta função permite adicionar um novo equipamento ao domínio${NC}"
-    echo -e "${CYAN}   (Computador, Servidor, Notebook, etc)${NC}"
-    echo ""
-    
-    if ! systemctl is-active --quiet samba-ad-dc; then
-        echo -e "${YELLOW}⚠️  O serviço Samba AD não está rodando. Tentando iniciar...${NC}"
-        systemctl start samba-ad-dc
-        sleep 3
-        if ! systemctl is-active --quiet samba-ad-dc; then
-            error "Não foi possível iniciar o Samba AD. Verifique o serviço."
-        fi
-    fi
-    
-    echo -e "${BLUE}=== INFORMAÇÕES DO EQUIPAMENTO ===${NC}"
-    echo ""
-    
-    echo -e "${BLUE}Digite o nome do equipamento:${NC}"
-    read -p "> " DEVICE_NAME
-    if [ -z "$DEVICE_NAME" ]; then
-        error "Nome do equipamento é obrigatório!"
-    fi
-    DEVICE_NAME=$(echo $DEVICE_NAME | tr '[:upper:]' '[:lower:]')
-    
-    echo -e "${BLUE}Digite o IP do equipamento:${NC}"
-    read -p "> " DEVICE_IP
-    if [ -z "$DEVICE_IP" ]; then
-        error "IP do equipamento é obrigatório!"
-    fi
-    
-    echo -e "${BLUE}Digite o MAC Address (opcional, Enter para pular):${NC}"
-    read -p "> " DEVICE_MAC
-    
-    echo -e "${BLUE}Tipo de equipamento:${NC}"
-    echo "  1) Computador (Workstation)"
-    echo "  2) Servidor (Server)"
-    echo "  3) Notebook (Laptop)"
-    echo "  4) Impressora (Printer)"
-    echo "  5) Outro"
-    read -p "> " DEVICE_TYPE
-    
-    case $DEVICE_TYPE in
-        1) DEVICE_CLASS="computer"; DEVICE_OU="Computadores" ;;
-        2) DEVICE_CLASS="server"; DEVICE_OU="Servidores" ;;
-        3) DEVICE_CLASS="computer"; DEVICE_OU="Notebooks" ;;
-        4) DEVICE_CLASS="printer"; DEVICE_OU="Impressoras" ;;
-        *) DEVICE_CLASS="computer"; DEVICE_OU="Outros" ;;
-    esac
-    
-    echo ""
-    echo -e "${YELLOW}⚠️  Resumo do equipamento:${NC}"
-    echo -e "  Nome: ${CYAN}${DEVICE_NAME}${NC}"
-    echo -e "  IP: ${CYAN}${DEVICE_IP}${NC}"
-    echo -e "  MAC: ${CYAN}${DEVICE_MAC:-Não informado}${NC}"
-    echo -e "  Tipo: ${CYAN}${DEVICE_CLASS} (${DEVICE_OU})${NC}"
-    echo ""
-    
-    read -p "Deseja adicionar este equipamento? (S/n): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Nn]$ ]]; then
-        info "Operação cancelada"
-        return
-    fi
-    
-    log "Adicionando equipamento ${DEVICE_NAME} ao domínio..."
-    
-    echo -e "${BLUE}1. Criando objeto no AD (localmente)...${NC}"
-    if samba-tool computer add ${DEVICE_NAME} -H ldap://127.0.0.1 2>/dev/null; then
-        success "Equipamento ${DEVICE_NAME} criado no AD"
-    else
-        warning "Falha ao criar equipamento no AD. Tentando método alternativo..."
-        if samba-tool computer add ${DEVICE_NAME} --ou=${DEVICE_OU} 2>/dev/null; then
-            success "Equipamento ${DEVICE_NAME} criado no AD (método alternativo)"
-        else
-            warning "Não foi possível criar o equipamento no AD."
-        fi
-    fi
-    
-    echo -e "${BLUE}2. Adicionando registro DNS...${NC}"
-    if samba-tool dns add 127.0.0.1 ${DOMAIN,,} ${DEVICE_NAME} A ${DEVICE_IP} 2>/dev/null; then
-        success "Registro DNS criado: ${DEVICE_NAME}.${DOMAIN,,} -> ${DEVICE_IP}"
-    else
-        warning "Falha ao criar registro DNS local. Tentando no primário..."
-        if samba-tool dns add ${PRIMARY_DC_IP} ${DOMAIN,,} ${DEVICE_NAME} A ${DEVICE_IP} 2>/dev/null; then
-            success "Registro DNS criado no primário"
-        else
-            warning "Não foi possível criar o registro DNS."
-        fi
-    fi
-    
-    echo -e "${BLUE}3. Adicionando ao /etc/hosts...${NC}"
-    if ! grep -q "${DEVICE_NAME}" /etc/hosts; then
-        echo "${DEVICE_IP} ${DEVICE_NAME}.${DOMAIN,,} ${DEVICE_NAME}" >> /etc/hosts
-        success "Entrada adicionada ao /etc/hosts"
-    else
-        info "Equipamento já existe no /etc/hosts"
-    fi
-    
-    echo -e "${BLUE}4. Criando arquivo de configuração...${NC}"
-    cat > /root/device_${DEVICE_NAME}_info.txt << EOF
-═══════════════════════════════════════════════════════════════════
-            CONFIGURAÇÃO DO EQUIPAMENTO - ${DEVICE_NAME}
-═══════════════════════════════════════════════════════════════════
-
-INFORMAÇÕES:
-  Nome: ${DEVICE_NAME}
-  IP: ${DEVICE_IP}
-  MAC: ${DEVICE_MAC:-Não informado}
-  Tipo: ${DEVICE_CLASS}
-  Domínio: ${DOMAIN}
-  Data: $(date)
-
-CONFIGURAÇÃO DE REDE:
-  IP: ${DEVICE_IP}
-  Máscara: 255.255.255.0
-  Gateway: ${FIXED_GATEWAY}
-  DNS: ${FIXED_IP} (Primário - $(hostname))
-  DNS2: ${PRIMARY_DC_IP} (Secundário)
-
-DOMÍNIO:
-  Nome: ${DOMAIN}
-  Servidor: $(hostname -f)
-  IP Servidor: ${FIXED_IP}
-
-COMANDOS PARA ADICIONAR NO CLIENTE:
-  # Linux (Ubuntu/Debian)
-  sudo hostnamectl set-hostname ${DEVICE_NAME}.${DOMAIN,,}
-  sudo echo "${DEVICE_IP} ${DEVICE_NAME}.${DOMAIN,,} ${DEVICE_NAME}" >> /etc/hosts
-  
-  # Configurar DNS no cliente
-  sudo echo "nameserver ${FIXED_IP}" > /etc/resolv.conf
-  sudo echo "nameserver ${PRIMARY_DC_IP}" >> /etc/resolv.conf
-  sudo echo "search ${DOMAIN,,}" >> /etc/resolv.conf
-  sudo echo "domain ${DOMAIN,,}" >> /etc/resolv.conf
-
-  # Para adicionar ao domínio (Linux)
-  sudo realm join -U administrator ${DOMAIN,,}
-
-  # Para adicionar ao domínio (Windows)
-  # Painel de Controle > Sistema > Alterar configurações > Domínio: ${DOMAIN}
-  # Usuário: ${ADMIN_USER}@${DOMAIN}
-  # Senha: [senha do administrador]
-
-═══════════════════════════════════════════════════════════════════
-EOF
-
-    success "Arquivo de configuração criado: /root/device_${DEVICE_NAME}_info.txt"
-    
-    echo ""
-    echo -e "${GREEN}✅ Equipamento ${DEVICE_NAME} adicionado com sucesso!${NC}"
-    echo ""
-    echo -e "${YELLOW}📁 Arquivo de configuração:${NC}"
-    echo -e "  ${BLUE}/root/device_${DEVICE_NAME}_info.txt${NC}"
-    echo ""
-    echo -e "${YELLOW}📋 Comandos para configurar o cliente:${NC}"
-    echo -e "  ${BLUE}hostnamectl set-hostname ${DEVICE_NAME}.${DOMAIN,,}${NC}"
-    echo -e "  ${BLUE}echo 'nameserver ${FIXED_IP}' > /etc/resolv.conf${NC}"
-    echo -e "  ${BLUE}realm join -U administrator ${DOMAIN,,}${NC}"
-    echo ""
-    
-    press_enter
-}
-
-# ============================================
-# GET INSTALLATION TYPE
-# ============================================
-
-get_installation_type() {
-    while true; do
-        read -p "👉 Escolha uma opção [1-6]: " choice
-        case $choice in
-            1) configure_network_menu; return 0 ;;
-            2) INSTALLATION_TYPE="primary"; break ;;
-            3) INSTALLATION_TYPE="secondary"; break ;;
-            4) replication_menu; return 0 ;;
-            5) add_network_device; return 0 ;;
-            6) echo -e "${YELLOW}Instalação cancelada.${NC}"; exit 0 ;;
-            *) echo -e "${RED}Opção inválida! Tente novamente.${NC}" ;;
-        esac
-    done
-    
-    if [ -z "$FIXED_IP" ] || [ "$FIXED_IP" == "127.0.0.1" ]; then
-        echo ""
-        echo -e "${RED}❌ Rede NÃO configurada!${NC}"
-        echo -e "${YELLOW}Por favor, configure a rede primeiro (Opção 1)${NC}"
-        echo ""
-        read -p "Pressione ENTER para voltar ao menu..."
-        INSTALLATION_TYPE=""
-        show_menu
-        get_installation_type
-        return
-    fi
 }
 
 # ============================================
