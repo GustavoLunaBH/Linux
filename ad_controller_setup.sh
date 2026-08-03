@@ -1,7 +1,7 @@
 #!/bin/bash
 # ad_controller_setup.sh
 # Script completo para instalação do Samba AD - Controlador de Domínio
-# Versão: 3.3 - CORRIGIDO: Secundário funcionando independente
+# Versão: 3.3 - CORRIGIDO: Secundário funcionando independente 
 
 # ============================================
 # CORES PARA OUTPUT
