@@ -828,7 +828,7 @@ collect_configurations() {
 }
 
 # ============================================
-# MÓDULO 8: CONFIGURAÇÕES BÁSICAS DO SISTEMA
+# MÓDULO 8: CONFIGURAÇÕES BÁSICAS DO SISTEMA (CORRIGIDO)
 # ============================================
 
 fix_system_dns() {
@@ -899,36 +899,107 @@ EOF
 
 configure_locale() {
     log "Configurando locale pt_BR..."
+    
+    # Instalar pacotes de locale se necessário
+    apt install -y language-pack-pt-base language-pack-pt locales 2>>"$LOG_FILE" || true
+    
+    # Gerar o locale
     locale-gen pt_BR.UTF-8 >>"$LOG_FILE" 2>&1
+    
+    # Configurar o locale no sistema
     update-locale LANG=pt_BR.UTF-8 LANGUAGE=pt_BR:pt LC_ALL=pt_BR.UTF-8 >>"$LOG_FILE" 2>&1
+    
+    # Exportar para a sessão atual
     export LANG=pt_BR.UTF-8
     export LANGUAGE=pt_BR:pt
     export LC_ALL=pt_BR.UTF-8
-    timedatectl set-timezone America/Sao_Paulo 2>>"$LOG_FILE"
-    success "Locale e timezone configurados"
+    
+    # Verificar se o locale foi configurado
+    if locale -a 2>/dev/null | grep -q "pt_BR.utf8"; then
+        success "Locale pt_BR.UTF-8 configurado"
+    else
+        warning "Falha ao configurar locale pt_BR.UTF-8, usando fallback"
+        export LANG=en_US.UTF-8
+        export LC_ALL=en_US.UTF-8
+        # Tentar gerar novamente
+        locale-gen en_US.UTF-8 >>"$LOG_FILE" 2>&1
+    fi
+    
+    # Configurar timezone
+    timedatectl set-timezone America/Sao_Paulo 2>>"$LOG_FILE" || true
+    success "Timezone configurado: America/Sao_Paulo"
 }
 
 configure_ntp() {
     log "Configurando NTP..."
     
+    # Verificar se o chrony está instalado
+    if ! command -v chrony &> /dev/null && ! command -v chronyd &> /dev/null; then
+        log "Chrony não encontrado, instalando..."
+        apt install -y chrony 2>>"$LOG_FILE" || true
+    fi
+    
+    # Determinar o arquivo de configuração correto
+    local chrony_conf=""
+    if [ -f "/etc/chrony/chrony.conf" ]; then
+        chrony_conf="/etc/chrony/chrony.conf"
+    elif [ -f "/etc/chrony.conf" ]; then
+        chrony_conf="/etc/chrony.conf"
+    else
+        # Criar diretório se não existir
+        mkdir -p /etc/chrony
+        chrony_conf="/etc/chrony/chrony.conf"
+    fi
+    
     local ntp_servers="${NTP_SERVER}"
     [ "$INSTALLATION_TYPE" == "secondary" ] && ntp_servers="${PRIMARY_DC_IP} ${NTP_SERVER}"
     
-    cat > /etc/chrony/chrony.conf << EOF
+    # Criar arquivo de configuração
+    cat > ${chrony_conf} << EOF
+# Configuração NTP para Samba AD
 server ${ntp_servers} iburst
 server 0.pool.ntp.org iburst
 server 1.pool.ntp.org iburst
 server 2.pool.ntp.org iburst
+
+# Arquivo de drift
 driftfile /var/lib/chrony/chrony.drift
+
+# Diretório de log
 logdir /var/log/chrony
+
+# Passos para sincronização rápida
 makestep 1 3
+
+# Permitir acesso local e da rede local
 allow 127.0.0.1
 allow 192.168.1.0/24
 EOF
     
-    systemctl enable chrony >>"$LOG_FILE" 2>&1
-    systemctl restart chrony >>"$LOG_FILE" 2>&1
-    success "NTP configurado"
+    success "Arquivo NTP criado: ${chrony_conf}"
+    
+    # Verificar e iniciar o serviço correto
+    if systemctl list-unit-files 2>/dev/null | grep -q "chrony.service"; then
+        systemctl enable chrony >>"$LOG_FILE" 2>&1 || true
+        systemctl restart chrony >>"$LOG_FILE" 2>&1 || true
+        if systemctl is-active --quiet chrony; then
+            success "NTP configurado com chrony"
+        else
+            warning "Falha ao iniciar chrony"
+        fi
+    elif systemctl list-unit-files 2>/dev/null | grep -q "ntp.service"; then
+        systemctl enable ntp >>"$LOG_FILE" 2>&1 || true
+        systemctl restart ntp >>"$LOG_FILE" 2>&1 || true
+        if systemctl is-active --quiet ntp; then
+            success "NTP configurado com ntp"
+        else
+            warning "Falha ao iniciar ntp"
+        fi
+    else
+        warning "Serviço NTP não encontrado. Instalando ntpdate..."
+        apt install -y ntpdate 2>>"$LOG_FILE" || true
+        ntpdate -u pool.ntp.br 2>/dev/null && success "Hora sincronizada via ntpdate" || warning "Falha na sincronização"
+    fi
 }
 
 sync_time() {
@@ -940,8 +1011,13 @@ sync_time() {
     if ntpdate -u ${PRIMARY_DC_IP} 2>/dev/null; then
         success "Hora sincronizada com o primário"
     else
+        # Tentar com pool público
         ntpdate -u pool.ntp.br 2>/dev/null || true
-        info "Hora sincronizada via internet"
+        if [ $? -eq 0 ]; then
+            info "Hora sincronizada via internet"
+        else
+            warning "Falha na sincronização de hora"
+        fi
     fi
 }
 
@@ -976,7 +1052,7 @@ install_packages() {
         net-tools iputils-ping \
         acl attr \
         bash-completion \
-        language-pack-pt locales \
+        language-pack-pt-base language-pack-pt locales \
         chrony \
         curl wget htop \
         traceroute mtr nmap tcpdump \
@@ -1013,424 +1089,7 @@ common_setup() {
 }
 
 # ============================================
-# MÓDULO 9: INSTALAÇÃO PRIMÁRIA
-# ============================================
-
-provision_domain() {
-    header "PROVISIONANDO DOMÍNIO ${DOMAIN}"
-    
-    log "Parando serviços conflitantes..."
-    systemctl stop smbd nmbd winbind 2>/dev/null || true
-    systemctl disable smbd nmbd winbind 2>/dev/null || true
-    
-    log "Limpando configurações antigas..."
-    rm -f /etc/samba/smb.conf
-    rm -rf /var/lib/samba/private 2>/dev/null || true
-    rm -rf /var/lib/samba/sysvol 2>/dev/null || true
-    rm -f /etc/krb5.conf
-    
-    log "Executando provisionamento..."
-    log "Isso pode levar alguns minutos..."
-    
-    samba-tool domain provision \
-        --realm=${REALM} \
-        --domain=${SHORT_DOMAIN} \
-        --server-role=dc \
-        --dns-backend=SAMBA_INTERNAL \
-        --adminpass=${ADMIN_PASSWORD} \
-        --use-rfc2307 \
-        --host-ip=${FIXED_IP} \
-        --option="interfaces=lo ${INTERFACE}" \
-        --option="bind interfaces only=yes" \
-        --option="dns forwarder=${DNS_FORWARDER}" \
-        >>"$LOG_FILE" 2>&1
-    
-    [ $? -eq 0 ] && success "Domínio provisionado com sucesso!" || error "Falha no provisionamento. Verifique o log: $LOG_FILE"
-}
-
-configure_samba_primary() {
-    log "Configurando samba.conf..."
-    
-    if [ ! -f "/etc/samba/smb.conf" ] && [ -f "/var/lib/samba/private/smb.conf" ]; then
-        cp /var/lib/samba/private/smb.conf /etc/samba/smb.conf
-    fi
-    
-    cat >> /etc/samba/smb.conf << 'EOF'
-    log level = 2
-    max log size = 10000
-    debug timestamp = yes
-    dns zone transfer clients = *
-EOF
-    
-    sed -i "s/interfaces.*=.*/interfaces = lo ${INTERFACE}/g" /etc/samba/smb.conf
-    success "samba.conf configurado"
-}
-
-configure_kerberos_primary() {
-    log "Configurando Kerberos..."
-    
-    cat > /etc/krb5.conf << EOF
-[libdefaults]
-    default_realm = ${REALM}
-    dns_lookup_realm = false
-    dns_lookup_kdc = true
-    ticket_lifetime = 24h
-    renew_lifetime = 7d
-    forwardable = true
-
-[realms]
-    ${REALM} = {
-        kdc = ${HOSTNAME}.${DOMAIN,,}
-        admin_server = ${HOSTNAME}.${DOMAIN,,}
-        default_domain = ${DOMAIN,,}
-    }
-
-[domain_realm]
-    .${DOMAIN,,} = ${REALM}
-    ${DOMAIN,,} = ${REALM}
-EOF
-    
-    success "Kerberos configurado"
-}
-
-test_primary_services() {
-    header "TESTANDO SERVIÇOS"
-    
-    log "Iniciando samba-ad-dc..."
-    systemctl unmask samba-ad-dc 2>/dev/null || true
-    systemctl enable samba-ad-dc 2>/dev/null || true
-    systemctl restart samba-ad-dc 2>>"$LOG_FILE"
-    
-    [ $? -eq 0 ] && success "Serviço samba-ad-dc iniciado" || error "Falha ao iniciar samba-ad-dc"
-    
-    log "Aguardando serviços iniciarem..."
-    sleep 10
-    
-    log "Testando Kerberos..."
-    if echo "${ADMIN_PASSWORD}" | kinit ${ADMIN_USER}@${DOMAIN} 2>/dev/null; then
-        success "Kerberos funcionando"
-        klist
-    else
-        warning "Kerberos com problemas - tentando novamente..."
-        sleep 5
-        echo "${ADMIN_PASSWORD}" | kinit ${ADMIN_USER}@${DOMAIN} 2>/dev/null && success "Kerberos funcionando (segunda tentativa)" || warning "Kerberos ainda com problemas"
-    fi
-    
-    log "Testando DNS..."
-    host ${DOMAIN,,} 127.0.0.1 &> /dev/null && success "DNS do domínio funcionando" || warning "DNS do domínio com problemas"
-}
-
-final_tests_primary() {
-    header "TESTES FINAIS"
-    
-    echo ""
-    echo -e "${BLUE}1. Verificando serviço:${NC}"
-    systemctl status samba-ad-dc --no-pager | head -3
-    echo ""
-    
-    echo -e "${BLUE}2. Verificando portas:${NC}"
-    ss -tlnp | grep -E ":53|:88|:389|:445|:135|:139" | head -5 || echo "  Nenhuma porta encontrada"
-    echo ""
-    
-    echo -e "${BLUE}3. Verificando DNS:${NC}"
-    host ${DOMAIN,,} 127.0.0.1 2>/dev/null || echo "  Domínio não resolvido"
-    echo ""
-    
-    echo -e "${BLUE}4. Verificando Kerberos:${NC}"
-    echo "${ADMIN_PASSWORD}" | kinit ${ADMIN_USER}@${DOMAIN} 2>/dev/null && echo "  ✓ Kerberos OK" || echo "  ✗ Kerberos FAIL"
-    klist 2>/dev/null || echo "  Nenhum ticket"
-    echo ""
-}
-
-install_primary() {
-    log "Iniciando instalação do CONTROLADOR PRIMÁRIO"
-    
-    common_setup
-    provision_domain
-    configure_samba_primary
-    configure_kerberos_primary
-    test_primary_services
-    final_tests_primary
-    create_fix_dns_script
-    save_info
-}
-
-# ============================================
-# MÓDULO 10: INSTALAÇÃO SECUNDÁRIA
-# ============================================
-
-remove_dhcp() {
-    header "REMOVENDO DHCP E CONFIGURANDO IP FIXO"
-    
-    stop_dhcp_services
-    detect_netplan_file
-    
-    update_netplan "${FIXED_IP}" "24" "${FIXED_GATEWAY}" "${PRIMARY_DC_IP}" "8.8.8.8" "${DOMAIN,,}"
-    apply_netplan
-}
-
-configure_kerberos_secondary() {
-    log "Configurando Kerberos..."
-    
-    cat > /etc/krb5.conf << EOF
-[libdefaults]
-    default_realm = ${REALM}
-    dns_lookup_realm = false
-    dns_lookup_kdc = true
-    ticket_lifetime = 24h
-    renew_lifetime = 7d
-    forwardable = true
-
-[realms]
-    ${REALM} = {
-        kdc = ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,}
-        admin_server = ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,}
-        default_domain = ${DOMAIN,,}
-    }
-
-[domain_realm]
-    .${DOMAIN,,} = ${REALM}
-    ${DOMAIN,,} = ${REALM}
-EOF
-    
-    success "Kerberos configurado"
-}
-
-test_connection() {
-    header "TESTANDO CONEXÃO"
-    
-    log "Testando conexão com o primário..."
-    
-    ping -c 3 ${PRIMARY_DC_IP} &> /dev/null && success "Primário acessível" || error "Primário não acessível - verifique o IP ${PRIMARY_DC_IP}"
-    
-    for porta in 445 389 88 53; do
-        nc -zv ${PRIMARY_DC_IP} $porta 2>/dev/null && success "Porta $porta acessível"
-    done
-}
-
-test_kerberos_secondary() {
-    header "TESTANDO KERBEROS"
-    
-    log "Autenticando com o primário..."
-    kdestroy 2>/dev/null || true
-    
-    if echo "${ADMIN_PASSWORD}" | kinit ${ADMIN_USER}@${DOMAIN} 2>/dev/null; then
-        success "Autenticação Kerberos OK"
-        klist 2>/dev/null
-    else
-        error "Falha na autenticação Kerberos"
-    fi
-}
-
-join_domain() {
-    header "JUNTANDO AO DOMÍNIO"
-    
-    log "Limpando configurações antigas..."
-    systemctl stop samba-ad-dc 2>/dev/null || true
-    rm -f /etc/samba/smb.conf
-    rm -rf /var/lib/samba/private 2>/dev/null || true
-    rm -rf /var/lib/samba/sysvol 2>/dev/null || true
-    
-    log "Fazendo join no domínio..."
-    
-    samba-tool domain join ${DOMAIN,,} DC \
-        --server=${PRIMARY_DC_IP} \
-        --password=${ADMIN_PASSWORD} \
-        --dns-backend=SAMBA_INTERNAL \
-        --option="interfaces=lo ${INTERFACE}" \
-        --option="bind interfaces only=yes" \
-        --option="dns forwarder=${DNS_FORWARDER}" \
-        >>"$LOG_FILE" 2>&1
-    
-    if [ $? -eq 0 ]; then
-        success "Join realizado com sucesso!"
-        return 0
-    fi
-    
-    log "Tentando método alternativo..."
-    samba-tool domain join ${DOMAIN,,} DC \
-        --server=${PRIMARY_DC_IP} \
-        --password=${ADMIN_PASSWORD} \
-        --option="interfaces=lo ${INTERFACE}" \
-        --option="bind interfaces only=yes" \
-        >>"$LOG_FILE" 2>&1
-    
-    [ $? -eq 0 ] && success "Join realizado com sucesso!" || error "Falha no join. Verifique o log: $LOG_FILE"
-}
-
-configure_samba_secondary() {
-    log "Configurando samba.conf..."
-    
-    if [ -f "/var/lib/samba/private/smb.conf" ]; then
-        cp /var/lib/samba/private/smb.conf /etc/samba/smb.conf
-    fi
-    
-    if [ -f "/etc/samba/smb.conf" ]; then
-        cat >> /etc/samba/smb.conf << 'EOF'
-    log level = 2
-    max log size = 10000
-    debug timestamp = yes
-    domain master = no
-    local master = no
-    preferred master = no
-    os level = 0
-EOF
-        sed -i "s/interfaces.*=.*/interfaces = lo ${INTERFACE}/g" /etc/samba/smb.conf
-    fi
-    
-    log "Iniciando samba-ad-dc..."
-    systemctl unmask samba-ad-dc 2>/dev/null || true
-    systemctl enable samba-ad-dc 2>/dev/null || true
-    systemctl restart samba-ad-dc 2>/dev/null || true
-    
-    sleep 5
-    
-    if systemctl is-active --quiet samba-ad-dc; then
-        success "Samba AD iniciado com sucesso"
-    else
-        warning "Falha ao iniciar samba-ad-dc - tentando novamente..."
-        systemctl start samba-ad-dc 2>/dev/null || true
-    fi
-}
-
-verify_secondary() {
-    header "VERIFICANDO INSTALAÇÃO"
-    
-    echo -e "${BLUE}=== IP ===${NC}"
-    ip addr show ${INTERFACE} | grep inet
-    echo ""
-    
-    echo -e "${BLUE}=== DNS ===${NC}"
-    cat /etc/resolv.conf
-    echo ""
-    
-    echo -e "${BLUE}=== AD ===${NC}"
-    samba-tool domain info 127.0.0.1 2>/dev/null | head -5 || echo "  Aguardando inicialização..."
-    echo ""
-    
-    echo -e "${BLUE}=== DCs ===${NC}"
-    samba-tool domain info 127.0.0.1 2>/dev/null | grep "DC name" || echo "  Aguardando inicialização..."
-    echo ""
-    
-    echo -e "${BLUE}=== Replicação ===${NC}"
-    samba-tool drs showrepl 2>/dev/null | head -5 || echo "  Aguardando replicação..."
-}
-
-install_secondary() {
-    log "Iniciando instalação do CONTROLADOR SECUNDÁRIO"
-    
-    remove_dhcp
-    common_setup
-    sync_time
-    configure_kerberos_secondary
-    test_connection
-    test_kerberos_secondary
-    join_domain
-    configure_samba_secondary
-    verify_secondary
-    create_fix_dns_script
-    save_info
-}
-
-# ============================================
-# MÓDULO 11: SCRIPTS AUXILIARES E FINALIZAÇÃO
-# ============================================
-
-create_fix_dns_script() {
-    cat > /usr/local/bin/fix-dns << 'EOF'
-#!/bin/bash
-echo "Corrigindo DNS do sistema..."
-chattr -i /etc/resolv.conf 2>/dev/null || true
-cat > /etc/resolv.conf << EOFF
-nameserver 192.168.1.2
-nameserver 127.0.0.1
-nameserver 8.8.8.8
-nameserver 1.1.1.1
-search rnv.intra
-domain rnv.intra
-EOFF
-chattr +i /etc/resolv.conf 2>/dev/null || true
-systemctl restart systemd-resolved 2>/dev/null || true
-echo "DNS corrigido!"
-EOF
-    chmod +x /usr/local/bin/fix-dns
-}
-
-save_info() {
-    cat > /root/ad_info.txt << EOF
-═══════════════════════════════════════════════════════════════════
-            CONTROLADOR DE DOMÍNIO - INFORMAÇÕES
-═══════════════════════════════════════════════════════════════════
-
-TIPO: $([ "$INSTALLATION_TYPE" == "primary" ] && echo "PRIMÁRIO" || echo "SECUNDÁRIO")
-DOMÍNIO: ${DOMAIN}
-REALM: ${REALM}
-HOSTNAME: ${HOSTNAME}.${DOMAIN,,}
-IP: ${FIXED_IP}
-GATEWAY: ${FIXED_GATEWAY}
-INTERFACE: ${INTERFACE}
-DNS FORWARDER: ${DNS_FORWARDER}
-NTP: ${NTP_SERVER}
-DATA: $(date)
-VERSÃO SCRIPT: ${SCRIPT_VERSION}
-
-───────────────────────────────────────────────────────────────────
-USUÁRIOS
-───────────────────────────────────────────────────────────────────
-Administrador: ${ADMIN_USER}@${DOMAIN}
-Senha: ${ADMIN_PASSWORD}
-
-Root (SSH): root / ${ADMIN_PASSWORD}
-
-───────────────────────────────────────────────────────────────────
-COMANDOS ÚTEIS
-───────────────────────────────────────────────────────────────────
-samba-tool domain info 127.0.0.1
-kinit ${ADMIN_USER}@${DOMAIN}
-klist
-host -t SRV _ldap._tcp.${DOMAIN,,}
-
-───────────────────────────────────────────────────────────────────
-LOG: ${LOG_FILE}
-EOF
-    
-    chmod 600 /root/ad_info.txt
-    success "Informações salvas em /root/ad_info.txt"
-}
-
-finalize_installation() {
-    clear
-    header "✅ INSTALAÇÃO CONCLUÍDA!"
-    
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}         CONTROLADOR DE DOMÍNIO INSTALADO COM SUCESSO!           ${NC}"
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    echo -e "${YELLOW}📌 ACESSO:${NC}"
-    echo -e "  Domínio: ${BLUE}${DOMAIN}${NC}"
-    echo -e "  Usuário: ${BLUE}${ADMIN_USER}@${DOMAIN}${NC}"
-    echo -e "  Senha:   ${BLUE}${ADMIN_PASSWORD}${NC}"
-    echo -e "  IP:      ${BLUE}${FIXED_IP}${NC}"
-    echo ""
-    echo -e "${YELLOW}📁 ARQUIVOS:${NC}"
-    echo -e "  ${BLUE}/root/ad_info.txt${NC} - Informações completas"
-    echo -e "  ${BLUE}${LOG_FILE}${NC} - Log da instalação"
-    echo ""
-    
-    echo -e "${YELLOW}⚠️  Recomenda-se reiniciar o servidor.${NC}"
-    read -p "Reiniciar agora? (s/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Ss]$ ]]; then
-        log "Reiniciando..."
-        sleep 5
-        reboot
-    else
-        log "Lembre-se de reiniciar depois."
-    fi
-}
-
-# ============================================
-# MÓDULO 12: MENU PRINCIPAL E MAIN
+# MÓDULO 12: MENU PRINCIPAL E MAIN (CORRIGIDO)
 # ============================================
 
 show_menu() {
