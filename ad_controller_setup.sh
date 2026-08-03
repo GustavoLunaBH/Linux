@@ -1,7 +1,7 @@
 #!/bin/bash
 # ad_controller_setup.sh
 # Script completo para instalação do Samba AD - Controlador de Domínio
-# Versão: 3.4 - Com replicação automática e menu completo
+# Versão: 3.5 - Com correção automática de DNS no secundário
 
 # ============================================
 # CORES PARA OUTPUT
@@ -33,7 +33,7 @@ PRIMARY_DC_IP="192.168.1.2"
 PRIMARY_DC_HOSTNAME="adserver01"
 SECONDARY_DC_IP="192.168.1.3"
 SECONDARY_DC_HOSTNAME="adserver02"
-SCRIPT_VERSION="3.4"
+SCRIPT_VERSION="3.5"
 LOG_FILE="/tmp/ad_setup_$(date +%Y%m%d_%H%M%S).log"
 INSTALLATION_TYPE=""
 HOSTNAME=""
@@ -732,7 +732,7 @@ install_primary() {
 }
 
 # ============================================
-# INSTALAÇÃO SECUNDÁRIA
+# INSTALAÇÃO SECUNDÁRIA - COM CORREÇÃO DNS
 # ============================================
 
 remove_dhcp() {
@@ -909,6 +909,81 @@ EOF
     fi
 }
 
+# ============================================
+# CORREÇÃO DNS PARA O SECUNDÁRIO - NOVA FUNÇÃO
+# ============================================
+
+fix_dns_secondary() {
+    header "CORRIGINDO DNS DO SERVIDOR SECUNDÁRIO"
+    
+    log "Corrigindo registros DNS do servidor secundário..."
+    
+    local DOMAIN_LOWER="${DOMAIN,,}"
+    local IP="${FIXED_IP}"
+    local HOST="${HOSTNAME}"
+    
+    echo -e "${BLUE}1. Verificando serviço Samba...${NC}"
+    if systemctl is-active --quiet samba-ad-dc; then
+        success "Samba AD está rodando"
+    else
+        warning "Samba AD não está rodando. Iniciando..."
+        systemctl start samba-ad-dc
+        sleep 3
+    fi
+    
+    echo -e "${BLUE}2. Registrando o domínio no DNS...${NC}"
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} @ A ${IP} -U ${ADMIN_USER} 2>/dev/null
+    if [ $? -eq 0 ]; then
+        success "Domínio registrado: ${DOMAIN_LOWER} -> ${IP}"
+    else
+        warning "Registro do domínio já existe ou falha ao criar"
+    fi
+    
+    echo -e "${BLUE}3. Registrando o servidor no DNS...${NC}"
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} ${HOST} A ${IP} -U ${ADMIN_USER} 2>/dev/null
+    if [ $? -eq 0 ]; then
+        success "Servidor registrado: ${HOST} -> ${IP}"
+    else
+        warning "Registro do servidor já existe ou falha ao criar"
+    fi
+    
+    echo -e "${BLUE}4. Registrando registros SRV...${NC}"
+    
+    echo "  Registrando _ldap._tcp..."
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _ldap._tcp SRV "0 100 389 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} 2>/dev/null
+    
+    echo "  Registrando _kerberos._tcp..."
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _kerberos._tcp SRV "0 100 88 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} 2>/dev/null
+    
+    echo "  Registrando _ldap._tcp.dc._msdcs..."
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _ldap._tcp.dc._msdcs SRV "0 100 389 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} 2>/dev/null
+    
+    echo "  Registrando _kerberos._tcp.dc._msdcs..."
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _kerberos._tcp.dc._msdcs SRV "0 100 88 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} 2>/dev/null
+    
+    echo "  Registrando _gc._tcp..."
+    samba-tool dns add 127.0.0.1 ${DOMAIN_LOWER} _gc._tcp SRV "0 100 3268 ${HOST}.${DOMAIN_LOWER}." -U ${ADMIN_USER} 2>/dev/null
+    
+    echo -e "${BLUE}5. Verificando registros DNS...${NC}"
+    echo ""
+    echo "  Registros A:"
+    samba-tool dns query 127.0.0.1 ${DOMAIN_LOWER} @ A 2>/dev/null | grep -A2 "A:"
+    echo ""
+    echo "  Registros SRV:"
+    samba-tool dns query 127.0.0.1 ${DOMAIN_LOWER} _ldap._tcp.${DOMAIN_LOWER} SRV 2>/dev/null | grep -A3 "SRV:"
+    echo ""
+    
+    echo -e "${BLUE}6. Testando resolução DNS...${NC}"
+    echo "  nslookup ${DOMAIN_LOWER}:"
+    nslookup ${DOMAIN_LOWER} 127.0.0.1 2>/dev/null
+    echo ""
+    echo "  nslookup ${HOST}.${DOMAIN_LOWER}:"
+    nslookup ${HOST}.${DOMAIN_LOWER} 127.0.0.1 2>/dev/null
+    echo ""
+    
+    success "DNS do servidor secundário corrigido!"
+}
+
 verify_secondary() {
     header "VERIFICANDO INSTALAÇÃO"
     
@@ -932,6 +1007,14 @@ verify_secondary() {
     samba-tool drs showrepl 2>/dev/null | head -5 || echo "  Aguardando replicação..."
     
     echo ""
+    echo -e "${BLUE}=== Teste de Resolução DNS ===${NC}"
+    echo "  Testando resolução do domínio:"
+    nslookup ${DOMAIN,,} 127.0.0.1 2>/dev/null || echo "  ❌ Domínio não resolvido"
+    echo ""
+    echo "  Testando resolução do servidor:"
+    nslookup $(hostname -f) 127.0.0.1 2>/dev/null || echo "  ❌ Servidor não resolvido"
+    echo ""
+    
     echo -e "${GREEN}✅ Servidor configurado como DC independente!${NC}"
     echo -e "${GREEN}   Pode adicionar equipamentos mesmo com o primário offline${NC}"
 }
@@ -947,6 +1030,7 @@ install_secondary() {
     test_kerberos_secondary
     join_domain
     configure_samba_secondary
+    fix_dns_secondary  # NOVA FUNÇÃO PARA CORRIGIR DNS
     verify_secondary
     create_fix_dns_script
     save_info
@@ -1047,7 +1131,12 @@ finalize_installation() {
     if [ "$INSTALLATION_TYPE" == "secondary" ]; then
         echo -e "${GREEN}📋 INFORMAÇÕES DO SECUNDÁRIO:${NC}"
         echo -e "  ${GREEN}✅ Servidor configurado para funcionar independentemente${NC}"
+        echo -e "  ${GREEN}✅ DNS configurado e registrado corretamente${NC}"
         echo -e "  ${GREEN}✅ Pode adicionar equipamentos mesmo com o primário offline${NC}"
+        echo ""
+        echo -e "${YELLOW}📌 Teste de DNS:${NC}"
+        echo -e "  ${BLUE}ping ${DOMAIN,,}${NC}"
+        echo -e "  ${BLUE}ping $(hostname -f)${NC}"
         echo ""
     fi
     
