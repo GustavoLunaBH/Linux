@@ -1,11 +1,13 @@
 #!/bin/bash
 # ad_controller_setup.sh
 # Script completo para instalação do Samba AD - Controlador de Domínio
-# Versão: 4.2 - COMPLETO E TESTADO
+# Versão: 4.3 - Organizado por Blocos Numerados
 
 # ============================================
-# CORES PARA OUTPUT
+# BLOCO 1: CORES E CONFIGURAÇÕES GLOBAIS
 # ============================================
+
+# Cores para output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -16,9 +18,7 @@ WHITE='\033[1;37m'
 NC='\033[0m'
 BOLD='\033[1m'
 
-# ============================================
-# CONFIGURAÇÕES PADRÃO
-# ============================================
+# Configurações padrão
 DOMAIN="RNV.INTRA"
 REALM="RNV.INTRA"
 SHORT_DOMAIN="RNV"
@@ -33,7 +33,7 @@ PRIMARY_DC_IP="192.168.1.2"
 PRIMARY_DC_HOSTNAME="adserver01"
 SECONDARY_DC_IP="192.168.1.3"
 SECONDARY_DC_HOSTNAME="adserver02"
-SCRIPT_VERSION="4.2"
+SCRIPT_VERSION="4.3"
 LOG_FILE="/tmp/ad_setup_$(date +%Y%m%d_%H%M%S).log"
 INSTALLATION_TYPE=""
 HOSTNAME=""
@@ -43,7 +43,7 @@ OS_INFO=""
 KERNEL_VERSION=""
 
 # ============================================
-# FUNÇÕES DE LOG E UTILITÁRIOS
+# BLOCO 2: FUNÇÕES DE LOG E UTILITÁRIOS
 # ============================================
 
 log() {
@@ -112,7 +112,7 @@ press_enter() {
 }
 
 # ============================================
-# DETECÇÃO DE SISTEMA
+# BLOCO 3: DETECÇÃO DE SISTEMA
 # ============================================
 
 detect_interface() {
@@ -209,7 +209,22 @@ auto_detect() {
 }
 
 # ============================================
-# GERENCIAMENTO DE REDE
+# BLOCO 4: DETECÇÃO DE SSH
+# ============================================
+
+is_ssh_session() {
+    if [ -n "$SSH_CONNECTION" ] || [ -n "$SSH_CLIENT" ] || [ -n "$SSH_TTY" ]; then
+        return 0
+    else
+        if who am i 2>/dev/null | grep -q "pts/"; then
+            return 0
+        fi
+        return 1
+    fi
+}
+
+# ============================================
+# BLOCO 5: GERENCIAMENTO DE REDE (NETPLAN)
 # ============================================
 
 update_netplan() {
@@ -326,6 +341,45 @@ apply_netplan() {
     fi
 }
 
+apply_network_with_notification() {
+    local new_ip="$1"
+    
+    if is_ssh_session; then
+        echo ""
+        echo -e "${YELLOW}⚠️  ATENÇÃO: Você está conectado via SSH!${NC}"
+        echo -e "${YELLOW}   O IP será alterado para ${new_ip}${NC}"
+        echo -e "${YELLOW}   A conexão SSH será perdida.${NC}"
+        echo -e "${YELLOW}   Reconecte-se usando: ssh root@${new_ip}${NC}"
+        echo ""
+        read -p "Deseja continuar mesmo assim? (s/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Ss]$ ]]; then
+            info "Aplicação cancelada"
+            return 1
+        fi
+        
+        apply_netplan
+        
+        echo ""
+        echo -e "${GREEN}✅ Configuração aplicada com sucesso!${NC}"
+        echo -e "${YELLOW}🔌 A sessão SSH será encerrada em 5 segundos...${NC}"
+        echo -e "${YELLOW}   Reconecte-se com: ssh root@${new_ip}${NC}"
+        echo ""
+        
+        for i in {5..1}; do
+            echo -n "  $i... "
+            sleep 1
+        done
+        echo ""
+        echo -e "${RED}🔌 Desconectando...${NC}"
+        sleep 1
+        exit 0
+    else
+        apply_netplan
+        return 0
+    fi
+}
+
 stop_dhcp_services() {
     log "Parando todos os serviços DHCP..."
     systemctl stop dhcpcd 2>/dev/null || true
@@ -342,7 +396,7 @@ stop_dhcp_services() {
 }
 
 # ============================================
-# MENU DE CONFIGURAÇÃO DE REDE
+# BLOCO 6: CONFIGURAÇÕES DE REDE (MENU)
 # ============================================
 
 configure_network_menu() {
@@ -406,6 +460,13 @@ configure_fixed_ip() {
     echo -e "${BLUE}Interface detectada: ${CYAN}${INTERFACE}${NC}"
     echo -e "${BLUE}Arquivo de rede atual: ${CYAN}${NETPLAN_FILE}${NC}"
     echo -e "${BLUE}IP atual: ${CYAN}${FIXED_IP:-Não configurado}${NC}"
+    
+    if is_ssh_session; then
+        echo -e "${YELLOW}🔌 Conexão via SSH detectada${NC}"
+        echo -e "${YELLOW}   Ao alterar o IP, a conexão será perdida${NC}"
+    else
+        echo -e "${GREEN}💻 Conexão local detectada${NC}"
+    fi
     echo ""
     
     echo -e "${BLUE}Digite o IP fixo [${FIXED_IP:-192.168.1.2}]:${NC}"
@@ -429,7 +490,7 @@ configure_fixed_ip() {
     echo -e "  Arquivo: ${CYAN}${NETPLAN_FILE}${NC}"
     echo ""
     
-    read -p "Deseja salvar esta configuração? (S/n): " -n 1 -r
+    read -p "Deseja salvar e aplicar esta configuração? (S/n): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Nn]$ ]]; then
         info "Configuração cancelada"
@@ -439,15 +500,7 @@ configure_fixed_ip() {
     update_netplan "${FIXED_IP}" "${NETMASK_INPUT}" "${FIXED_GATEWAY}"
     success "Configuração salva no arquivo: $(basename ${NETPLAN_FILE})"
     
-    echo ""
-    echo -e "${BLUE}Deseja aplicar a configuração agora? (S/n): ${NC}"
-    read -p "> " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Ss]$ ]] || [[ -z "$REPLY" ]]; then
-        apply_netplan
-    else
-        info "Configuração salva. Use a Opção 5 do menu para aplicar depois."
-    fi
+    apply_network_with_notification "${FIXED_IP}"
 }
 
 configure_dns_settings() {
@@ -472,7 +525,7 @@ configure_dns_settings() {
     echo -e "  Domínio: ${CYAN}${SEARCH_DOMAIN}${NC}"
     echo ""
     
-    read -p "Deseja salvar esta configuração? (S/n): " -n 1 -r
+    read -p "Deseja salvar e aplicar esta configuração? (S/n): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Nn]$ ]]; then
         info "Configuração cancelada"
@@ -495,15 +548,13 @@ EOF
     
     success "DNS configurado com sucesso!"
     
-    echo ""
-    echo -e "${BLUE}Deseja aplicar a configuração agora? (S/n): ${NC}"
-    read -p "> " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Ss]$ ]] || [[ -z "$REPLY" ]]; then
-        apply_netplan
-    else
-        info "Configuração salva. Use a Opção 5 do menu para aplicar depois."
+    if is_ssh_session; then
+        echo -e "${YELLOW}🔌 Conexão via SSH detectada${NC}"
+        echo -e "${YELLOW}   As configurações de DNS foram aplicadas${NC}"
+        echo -e "${YELLOW}   A conexão SSH não será afetada${NC}"
     fi
+    
+    apply_netplan
 }
 
 show_network_status() {
@@ -575,7 +626,7 @@ test_connectivity() {
 }
 
 # ============================================
-# FUNÇÕES DE CONFIGURAÇÃO BÁSICA
+# BLOCO 7: CONFIGURAÇÕES BÁSICAS DO SISTEMA
 # ============================================
 
 fix_system_dns() {
@@ -822,7 +873,7 @@ common_setup() {
 }
 
 # ============================================
-# INSTALAÇÃO PRIMÁRIA
+# BLOCO 8: INSTALAÇÃO PRIMÁRIA
 # ============================================
 
 provision_domain() {
@@ -971,15 +1022,13 @@ install_primary() {
     test_primary_services
     final_tests_primary
     
-    # Configurar firewall
     configure_firewall
-    
     create_fix_dns_script
     save_info
 }
 
 # ============================================
-# INSTALAÇÃO SECUNDÁRIA
+# BLOCO 9: INSTALAÇÃO SECUNDÁRIA
 # ============================================
 
 remove_dhcp() {
@@ -1118,7 +1167,6 @@ configure_samba_secondary() {
     fi
     
     if [ -f "/etc/samba/smb.conf" ]; then
-        # Remover parâmetros problemáticos
         sed -i '/bind interfaces only/d' /etc/samba/smb.conf
         sed -i '/server signing/d' /etc/samba/smb.conf
         sed -i '/client signing/d' /etc/samba/smb.conf
@@ -1157,8 +1205,59 @@ EOF
     fi
 }
 
+verify_secondary() {
+    header "VERIFICANDO INSTALAÇÃO"
+    
+    echo -e "${BLUE}=== IP ===${NC}"
+    ip addr show ${INTERFACE} | grep inet
+    echo ""
+    
+    echo -e "${BLUE}=== DNS ===${NC}"
+    cat /etc/resolv.conf
+    echo ""
+    
+    echo -e "${BLUE}=== AD ===${NC}"
+    samba-tool domain info 127.0.0.1 2>/dev/null | head -5 || echo "  Aguardando inicialização..."
+    echo ""
+    
+    echo -e "${BLUE}=== DCs ===${NC}"
+    samba-tool domain info 127.0.0.1 2>/dev/null | grep "DC name" || echo "  Aguardando inicialização..."
+    echo ""
+    
+    echo -e "${BLUE}=== Replicação ===${NC}"
+    samba-tool drs showrepl 2>/dev/null | head -5 || echo "  Aguardando replicação..."
+    echo ""
+    
+    echo -e "${BLUE}=== Teste de DNS ===${NC}"
+    nslookup ${DOMAIN,,} 127.0.0.1 2>/dev/null || echo "  ❌ DNS não respondendo"
+    echo ""
+    
+    echo -e "${GREEN}✅ Servidor configurado como DC independente!${NC}"
+    echo -e "${GREEN}   Pode adicionar equipamentos mesmo com o primário offline${NC}"
+}
+
+install_secondary() {
+    log "Iniciando instalação do CONTROLADOR SECUNDÁRIO"
+    
+    remove_dhcp
+    common_setup
+    sync_time
+    configure_kerberos_secondary
+    test_connection
+    test_kerberos_secondary
+    join_domain
+    configure_samba_secondary
+    configure_firewall
+    enable_ssh_root
+    fix_dns_secondary
+    setup_auto_replication
+    verify_secondary
+    create_fix_dns_script
+    save_info
+}
+
 # ============================================
-# CONFIGURAR FIREWALL
+# BLOCO 10: CONFIGURAÇÕES ADICIONAIS
 # ============================================
 
 configure_firewall() {
@@ -1166,7 +1265,6 @@ configure_firewall() {
     
     log "Configurando firewall para o AD..."
     
-    # Configurar UFW
     if command -v ufw &> /dev/null; then
         for port in 53 88 135 139 389 445 636 3268 3269 464; do
             ufw allow ${port}/tcp 2>/dev/null
@@ -1177,7 +1275,6 @@ configure_firewall() {
         success "UFW configurado"
     fi
     
-    # Configurar iptables
     if command -v iptables &> /dev/null; then
         iptables -A INPUT -i lo -j ACCEPT 2>/dev/null
         iptables -A INPUT -s 192.168.1.0/24 -j ACCEPT 2>/dev/null
@@ -1189,10 +1286,6 @@ configure_firewall() {
         success "iptables configurado"
     fi
 }
-
-# ============================================
-# CORREÇÃO DNS PARA O SECUNDÁRIO
-# ============================================
 
 fix_dns_secondary() {
     header "CORRIGINDO DNS DO SERVIDOR SECUNDÁRIO"
@@ -1235,10 +1328,6 @@ fix_dns_secondary() {
     success "DNS do servidor secundário corrigido!"
 }
 
-# ============================================
-# HABILITAR SSH ROOT
-# ============================================
-
 enable_ssh_root() {
     log "Habilitando SSH Root..."
     
@@ -1255,10 +1344,6 @@ enable_ssh_root() {
         success "SSH Root habilitado"
     fi
 }
-
-# ============================================
-# REPLICAÇÃO AUTOMÁTICA
-# ============================================
 
 setup_auto_replication() {
     header "CONFIGURANDO REPLICAÇÃO AUTOMÁTICA"
@@ -1280,7 +1365,6 @@ log_msg() {
 log_msg "=========================================="
 log_msg "Iniciando replicação - ${CURRENT_DC}"
 
-# Determinar o outro DC
 if [ "${CURRENT_HOSTNAME}" = "adserver01" ]; then
     SOURCE_DC="${CURRENT_DC}"
     TARGET_DC="adserver02.rnv.intra"
@@ -1291,14 +1375,12 @@ fi
 
 log_msg "Replicando de ${SOURCE_DC} para ${TARGET_DC}"
 
-# Tentar replicação
 if samba-tool drs replicate ${TARGET_DC} ${SOURCE_DC} "DC=rnv,DC=intra" --sync-forced 2>/dev/null; then
     log_msg "✓ Replicação OK"
 else
     log_msg "✗ Falha na replicação"
 fi
 
-# Sync-all
 samba-tool drs replicate ${TARGET_DC} ${TARGET_DC} "DC=rnv,DC=intra" --sync-all 2>/dev/null
 
 log_msg "Replicação concluída"
@@ -1318,66 +1400,7 @@ EOF
 }
 
 # ============================================
-# VERIFICAÇÃO PÓS-INSTALAÇÃO
-# ============================================
-
-verify_secondary() {
-    header "VERIFICANDO INSTALAÇÃO"
-    
-    echo -e "${BLUE}=== IP ===${NC}"
-    ip addr show ${INTERFACE} | grep inet
-    echo ""
-    
-    echo -e "${BLUE}=== DNS ===${NC}"
-    cat /etc/resolv.conf
-    echo ""
-    
-    echo -e "${BLUE}=== AD ===${NC}"
-    samba-tool domain info 127.0.0.1 2>/dev/null | head -5 || echo "  Aguardando inicialização..."
-    echo ""
-    
-    echo -e "${BLUE}=== DCs ===${NC}"
-    samba-tool domain info 127.0.0.1 2>/dev/null | grep "DC name" || echo "  Aguardando inicialização..."
-    echo ""
-    
-    echo -e "${BLUE}=== Replicação ===${NC}"
-    samba-tool drs showrepl 2>/dev/null | head -5 || echo "  Aguardando replicação..."
-    echo ""
-    
-    echo -e "${BLUE}=== Teste de DNS ===${NC}"
-    nslookup ${DOMAIN,,} 127.0.0.1 2>/dev/null || echo "  ❌ DNS não respondendo"
-    echo ""
-    
-    echo -e "${GREEN}✅ Servidor configurado como DC independente!${NC}"
-    echo -e "${GREEN}   Pode adicionar equipamentos mesmo com o primário offline${NC}"
-}
-
-# ============================================
-# INSTALAÇÃO COMPLETA
-# ============================================
-
-install_secondary() {
-    log "Iniciando instalação do CONTROLADOR SECUNDÁRIO"
-    
-    remove_dhcp
-    common_setup
-    sync_time
-    configure_kerberos_secondary
-    test_connection
-    test_kerberos_secondary
-    join_domain
-    configure_samba_secondary
-    configure_firewall
-    enable_ssh_root
-    fix_dns_secondary
-    setup_auto_replication
-    verify_secondary
-    create_fix_dns_script
-    save_info
-}
-
-# ============================================
-# SCRIPTS AUXILIARES
+# BLOCO 11: SCRIPTS AUXILIARES
 # ============================================
 
 create_fix_dns_script() {
@@ -1493,7 +1516,7 @@ finalize_installation() {
 }
 
 # ============================================
-# COLETA DE CONFIGURAÇÕES
+# BLOCO 12: COLETA DE CONFIGURAÇÕES
 # ============================================
 
 collect_configurations() {
@@ -1587,7 +1610,7 @@ collect_configurations() {
 }
 
 # ============================================
-# MENU PRINCIPAL
+# BLOCO 13: MENU PRINCIPAL
 # ============================================
 
 show_menu() {
@@ -1650,6 +1673,10 @@ show_menu() {
     echo ""
 }
 
+# ============================================
+# BLOCO 14: GET INSTALLATION TYPE E MAIN
+# ============================================
+
 get_installation_type() {
     while true; do
         read -p "👉 Escolha uma opção [1-7]: " choice
@@ -1702,7 +1729,7 @@ get_installation_type() {
 }
 
 # ============================================
-# MAIN
+# BLOCO 15: MAIN
 # ============================================
 
 if [[ $EUID -ne 0 ]]; then
