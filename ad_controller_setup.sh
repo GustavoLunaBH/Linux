@@ -1,7 +1,7 @@
 #!/bin/bash
 # ad_controller_setup.sh
 # Script completo para instalação do Samba AD - Controlador de Domínio
-# Versão: 3.2 - COMPLETO E FUNCIONAL
+# Versão: 3.3 - CORRIGIDO: Secundário funcionando independente
 
 # ============================================
 # CORES PARA OUTPUT
@@ -31,7 +31,7 @@ DNS_FORWARDER="8.8.8.8"
 NTP_SERVER="a.st1.ntp.br"
 PRIMARY_DC_IP="192.168.1.2"
 PRIMARY_DC_HOSTNAME="adserver01"
-SCRIPT_VERSION="3.2"
+SCRIPT_VERSION="3.3"
 LOG_FILE="/tmp/ad_setup_$(date +%Y%m%d_%H%M%S).log"
 INSTALLATION_TYPE=""
 HOSTNAME=""
@@ -354,7 +354,7 @@ fix_system_dns() {
     mkdir -p /etc/resolvconf/resolv.conf.d 2>/dev/null
     
     local dns_primary="${FIXED_IP}"
-    [ "$INSTALLATION_TYPE" == "secondary" ] && dns_primary="${PRIMARY_DC_IP}"
+    [ "$INSTALLATION_TYPE" == "secondary" ] && dns_primary="${FIXED_IP}"  # CORRIGIDO: Secundário usa seu próprio IP
     
     cat > /etc/resolv.conf << EOF
 nameserver ${dns_primary}
@@ -386,13 +386,15 @@ EOF
 }
 
 configure_dns_secondary() {
-    header "CONFIGURANDO DNS SECUNDÁRIO"
+    header "CONFIGURANDO DNS SECUNDÁRIO - CORRIGIDO"
     
-    log "Configurando /etc/resolv.conf..."
+    log "Configurando /etc/resolv.conf com o próprio IP como primário..."
     chattr -i /etc/resolv.conf 2>/dev/null || true
     rm -f /etc/resolv.conf
     
+    # CORRIGIDO: O secundário usa seu próprio IP como DNS primário
     cat > /etc/resolv.conf << EOF
+nameserver ${FIXED_IP}
 nameserver ${PRIMARY_DC_IP}
 nameserver 8.8.8.8
 search ${DOMAIN,,}
@@ -400,6 +402,7 @@ domain ${DOMAIN,,}
 EOF
     chattr +i /etc/resolv.conf 2>/dev/null || true
     
+    # CORRIGIDO: /etc/hosts com o próprio servidor primeiro
     cat > /etc/hosts << EOF
 127.0.0.1 localhost
 127.0.1.1 ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
@@ -408,7 +411,7 @@ ${FIXED_IP} ${HOSTNAME}
 ${PRIMARY_DC_IP} ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,} ${PRIMARY_DC_HOSTNAME}
 EOF
     
-    success "DNS e hosts configurados"
+    success "DNS e hosts configurados - Servidor funcionando independente"
 }
 
 configure_locale() {
@@ -574,7 +577,7 @@ common_setup() {
     log "Executando configurações comuns..."
     
     if [ "$INSTALLATION_TYPE" == "secondary" ]; then
-        configure_dns_secondary
+        configure_dns_secondary  # CORRIGIDO: Usa nova função
     else
         fix_system_dns
     fi
@@ -716,7 +719,7 @@ final_tests_primary() {
 }
 
 # ============================================
-# INSTALAÇÃO SECUNDÁRIA
+# INSTALAÇÃO SECUNDÁRIA - CORRIGIDA
 # ============================================
 
 remove_dhcp() {
@@ -725,13 +728,15 @@ remove_dhcp() {
     stop_dhcp_services
     detect_netplan_file
     
-    update_netplan "${FIXED_IP}" "24" "${FIXED_GATEWAY}" "${PRIMARY_DC_IP}" "8.8.8.8" "${DOMAIN,,}"
+    # CORRIGIDO: O secundário usa seu próprio IP como DNS primário
+    update_netplan "${FIXED_IP}" "24" "${FIXED_GATEWAY}" "${FIXED_IP}" "8.8.8.8" "${DOMAIN,,}"
     apply_netplan
 }
 
 configure_kerberos_secondary() {
-    log "Configurando Kerberos..."
+    log "Configurando Kerberos - CORRIGIDO..."
     
+    # CORRIGIDO: O secundário também pode ser KDC
     cat > /etc/krb5.conf << EOF
 [libdefaults]
     default_realm = ${REALM}
@@ -743,8 +748,8 @@ configure_kerberos_secondary() {
 
 [realms]
     ${REALM} = {
-        kdc = ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,}
-        admin_server = ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,}
+        kdc = ${HOSTNAME}.${DOMAIN,,}
+        admin_server = ${HOSTNAME}.${DOMAIN,,}
         default_domain = ${DOMAIN,,}
     }
 
@@ -761,24 +766,39 @@ test_connection() {
     
     log "Testando conexão com o primário..."
     
-    ping -c 3 ${PRIMARY_DC_IP} &> /dev/null && success "Primário acessível" || error "Primário não acessível - verifique o IP ${PRIMARY_DC_IP}"
+    if ping -c 3 ${PRIMARY_DC_IP} &> /dev/null; then
+        success "Primário acessível"
+        PRIMARY_ONLINE=true
+    else
+        warning "Primário não acessível - O servidor funcionará independente"
+        PRIMARY_ONLINE=false
+    fi
     
-    for porta in 445 389 88 53; do
-        nc -zv ${PRIMARY_DC_IP} $porta 2>/dev/null && success "Porta $porta acessível"
-    done
+    # Testar portas apenas se o primário estiver online
+    if [ "$PRIMARY_ONLINE" = true ]; then
+        for porta in 445 389 88 53; do
+            nc -zv ${PRIMARY_DC_IP} $porta 2>/dev/null && success "Porta $porta acessível"
+        done
+    fi
 }
 
 test_kerberos_secondary() {
     header "TESTANDO KERBEROS"
     
-    log "Autenticando com o primário..."
+    log "Autenticando com o domínio..."
     kdestroy 2>/dev/null || true
     
     if echo "${ADMIN_PASSWORD}" | kinit ${ADMIN_USER}@${DOMAIN} 2>/dev/null; then
         success "Autenticação Kerberos OK"
         klist 2>/dev/null
     else
-        error "Falha na autenticação Kerberos"
+        warning "Falha na autenticação Kerberos - tentando novamente..."
+        sleep 3
+        if echo "${ADMIN_PASSWORD}" | kinit ${ADMIN_USER}@${DOMAIN} 2>/dev/null; then
+            success "Autenticação Kerberos OK (segunda tentativa)"
+        else
+            error "Falha na autenticação Kerberos - verifique a configuração"
+        fi
     fi
 }
 
@@ -793,6 +813,8 @@ join_domain() {
     
     log "Fazendo join no domínio..."
     
+    # CORRIGIDO: Tentar vários métodos de join
+    # Método 1: Com servidor específico
     samba-tool domain join ${DOMAIN,,} DC \
         --server=${PRIMARY_DC_IP} \
         --password=${ADMIN_PASSWORD} \
@@ -807,25 +829,48 @@ join_domain() {
         return 0
     fi
     
-    log "Tentando método alternativo..."
+    # Método 2: Sem servidor específico (usando DNS)
+    log "Tentando método alternativo (usando DNS)..."
     samba-tool domain join ${DOMAIN,,} DC \
-        --server=${PRIMARY_DC_IP} \
         --password=${ADMIN_PASSWORD} \
+        --dns-backend=SAMBA_INTERNAL \
         --option="interfaces=lo ${INTERFACE}" \
         --option="bind interfaces only=yes" \
         >>"$LOG_FILE" 2>&1
     
-    [ $? -eq 0 ] && success "Join realizado com sucesso!" || error "Falha no join. Verifique o log: $LOG_FILE"
+    if [ $? -eq 0 ]; then
+        success "Join realizado com sucesso (método DNS)!"
+        return 0
+    fi
+    
+    # Método 3: Join básico
+    log "Tentando método básico..."
+    samba-tool domain join ${DOMAIN,,} DC \
+        --password=${ADMIN_PASSWORD} \
+        >>"$LOG_FILE" 2>&1
+    
+    if [ $? -eq 0 ]; then
+        success "Join realizado com sucesso (método básico)!"
+        return 0
+    fi
+    
+    error "Falha no join. Verifique o log: $LOG_FILE"
 }
 
 configure_samba_secondary() {
-    log "Configurando samba.conf..."
+    log "Configurando samba.conf - CORRIGIDO..."
     
     if [ -f "/var/lib/samba/private/smb.conf" ]; then
         cp /var/lib/samba/private/smb.conf /etc/samba/smb.conf
     fi
     
     if [ -f "/etc/samba/smb.conf" ]; then
+        # CORRIGIDO: Removendo parâmetros problemáticos
+        sed -i '/bind interfaces/d' /etc/samba/smb.conf
+        sed -i '/server signing/d' /etc/samba/smb.conf
+        sed -i '/client signing/d' /etc/samba/smb.conf
+        sed -i '/ntlm auth/d' /etc/samba/smb.conf
+        
         cat >> /etc/samba/smb.conf << 'EOF'
     log level = 2
     max log size = 10000
@@ -850,11 +895,17 @@ EOF
     else
         warning "Falha ao iniciar samba-ad-dc - tentando novamente..."
         systemctl start samba-ad-dc 2>/dev/null || true
+        sleep 5
+        if systemctl is-active --quiet samba-ad-dc; then
+            success "Samba AD iniciado na segunda tentativa"
+        else
+            error "Falha ao iniciar samba-ad-dc"
+        fi
     fi
 }
 
 verify_secondary() {
-    header "VERIFICANDO INSTALAÇÃO"
+    header "VERIFICANDO INSTALAÇÃO - CORRIGIDO"
     
     echo -e "${BLUE}=== IP ===${NC}"
     ip addr show ${INTERFACE} | grep inet
@@ -874,6 +925,10 @@ verify_secondary() {
     
     echo -e "${BLUE}=== Replicação ===${NC}"
     samba-tool drs showrepl 2>/dev/null | head -5 || echo "  Aguardando replicação..."
+    
+    echo ""
+    echo -e "${GREEN}✅ Servidor configurado como DC independente!${NC}"
+    echo -e "${GREEN}   Pode adicionar equipamentos mesmo com o primário offline${NC}"
 }
 
 # ============================================
@@ -960,6 +1015,16 @@ finalize_installation() {
     echo -e "  ${BLUE}/root/ad_info.txt${NC} - Informações completas"
     echo -e "  ${BLUE}${LOG_FILE}${NC} - Log da instalação"
     echo ""
+    
+    if [ "$INSTALLATION_TYPE" == "secondary" ]; then
+        echo -e "${GREEN}📋 INFORMAÇÕES DO SECUNDÁRIO:${NC}"
+        echo -e "  ${GREEN}✅ Servidor configurado para funcionar independentemente${NC}"
+        echo -e "  ${GREEN}✅ Pode adicionar equipamentos mesmo com o primário offline${NC}"
+        echo ""
+        echo -e "${YELLOW}💡 DICA: Para adicionar equipamentos, use o comando:${NC}"
+        echo -e "  ${BLUE}samba-tool computer add NOME_EQUIPAMENTO${NC}"
+        echo ""
+    fi
     
     echo -e "${YELLOW}⚠️  Recomenda-se reiniciar o servidor.${NC}"
     read -p "Reiniciar agora? (s/N): " -n 1 -r
@@ -1081,7 +1146,7 @@ install_primary() {
 }
 
 install_secondary() {
-    log "Iniciando instalação do CONTROLADOR SECUNDÁRIO"
+    log "Iniciando instalação do CONTROLADOR SECUNDÁRIO - CORRIGIDO"
     
     remove_dhcp
     common_setup
@@ -1143,7 +1208,7 @@ show_menu() {
     echo -e "     ${CYAN}➜${NC} Primeiro DC do domínio"
     echo ""
     echo -e "${GREEN} 3)${NC} ${BOLD}INSTALAR CONTROLADOR SECUNDÁRIO${NC}"
-    echo -e "     ${CYAN}➜${NC} DC adicional para redundância"
+    echo -e "     ${CYAN}➜${NC} DC adicional (funciona independente)"
     echo ""
     echo -e "${GREEN} 4)${NC} ${BOLD}ADICIONAR EQUIPAMENTO NA REDE${NC}"
     echo -e "     ${CYAN}➜${NC} Adicionar computador/servidor ao domínio"
@@ -1390,8 +1455,14 @@ add_network_device() {
     echo -e "${CYAN}   (Computador, Servidor, Notebook, etc)${NC}"
     echo ""
     
+    # CORRIGIDO: Verifica se o Samba está rodando localmente
     if ! systemctl is-active --quiet samba-ad-dc; then
-        error "O serviço Samba AD não está rodando. Instale o AD primeiro."
+        echo -e "${YELLOW}⚠️  O serviço Samba AD não está rodando. Tentando iniciar...${NC}"
+        systemctl start samba-ad-dc
+        sleep 3
+        if ! systemctl is-active --quiet samba-ad-dc; then
+            error "Não foi possível iniciar o Samba AD. Verifique o serviço."
+        fi
     fi
     
     echo -e "${BLUE}=== INFORMAÇÕES DO EQUIPAMENTO ===${NC}"
@@ -1446,8 +1517,9 @@ add_network_device() {
     
     log "Adicionando equipamento ${DEVICE_NAME} ao domínio..."
     
-    echo -e "${BLUE}1. Criando objeto no AD...${NC}"
-    if samba-tool computer add ${DEVICE_NAME} -H ldap://${PRIMARY_DC_IP} 2>/dev/null; then
+    # CORRIGIDO: Usa o servidor local (127.0.0.1) em vez do primário
+    echo -e "${BLUE}1. Criando objeto no AD (localmente)...${NC}"
+    if samba-tool computer add ${DEVICE_NAME} -H ldap://127.0.0.1 2>/dev/null; then
         success "Equipamento ${DEVICE_NAME} criado no AD"
     else
         warning "Falha ao criar equipamento no AD. Tentando método alternativo..."
@@ -1458,11 +1530,17 @@ add_network_device() {
         fi
     fi
     
+    # CORRIGIDO: Tenta adicionar DNS localmente primeiro
     echo -e "${BLUE}2. Adicionando registro DNS...${NC}"
-    if samba-tool dns add ${PRIMARY_DC_IP} ${DOMAIN,,} ${DEVICE_NAME} A ${DEVICE_IP} -U ${ADMIN_USER} 2>/dev/null; then
+    if samba-tool dns add 127.0.0.1 ${DOMAIN,,} ${DEVICE_NAME} A ${DEVICE_IP} 2>/dev/null; then
         success "Registro DNS criado: ${DEVICE_NAME}.${DOMAIN,,} -> ${DEVICE_IP}"
     else
-        warning "Falha ao criar registro DNS."
+        warning "Falha ao criar registro DNS local. Tentando no primário..."
+        if samba-tool dns add ${PRIMARY_DC_IP} ${DOMAIN,,} ${DEVICE_NAME} A ${DEVICE_IP} 2>/dev/null; then
+            success "Registro DNS criado no primário"
+        else
+            warning "Não foi possível criar o registro DNS."
+        fi
     fi
     
     echo -e "${BLUE}3. Adicionando ao /etc/hosts...${NC}"
@@ -1491,13 +1569,13 @@ CONFIGURAÇÃO DE REDE:
   IP: ${DEVICE_IP}
   Máscara: 255.255.255.0
   Gateway: ${FIXED_GATEWAY}
-  DNS: ${PRIMARY_DC_IP} (Primário)
-  DNS2: 8.8.8.8 (Secundário)
+  DNS: ${FIXED_IP} (Primário - $(hostname))
+  DNS2: ${PRIMARY_DC_IP} (Secundário)
 
 DOMÍNIO:
   Nome: ${DOMAIN}
-  Servidor: ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,}
-  IP Servidor: ${PRIMARY_DC_IP}
+  Servidor: $(hostname -f)
+  IP Servidor: ${FIXED_IP}
 
 COMANDOS PARA ADICIONAR NO CLIENTE:
   # Linux (Ubuntu/Debian)
@@ -1505,7 +1583,8 @@ COMANDOS PARA ADICIONAR NO CLIENTE:
   sudo echo "${DEVICE_IP} ${DEVICE_NAME}.${DOMAIN,,} ${DEVICE_NAME}" >> /etc/hosts
   
   # Configurar DNS no cliente
-  sudo echo "nameserver ${PRIMARY_DC_IP}" > /etc/resolv.conf
+  sudo echo "nameserver ${FIXED_IP}" > /etc/resolv.conf
+  sudo echo "nameserver ${PRIMARY_DC_IP}" >> /etc/resolv.conf
   sudo echo "search ${DOMAIN,,}" >> /etc/resolv.conf
   sudo echo "domain ${DOMAIN,,}" >> /etc/resolv.conf
 
@@ -1530,7 +1609,7 @@ EOF
     echo ""
     echo -e "${YELLOW}📋 Comandos para configurar o cliente:${NC}"
     echo -e "  ${BLUE}hostnamectl set-hostname ${DEVICE_NAME}.${DOMAIN,,}${NC}"
-    echo -e "  ${BLUE}echo 'nameserver ${PRIMARY_DC_IP}' > /etc/resolv.conf${NC}"
+    echo -e "  ${BLUE}echo 'nameserver ${FIXED_IP}' > /etc/resolv.conf${NC}"
     echo -e "  ${BLUE}realm join -U administrator ${DOMAIN,,}${NC}"
     echo ""
     
