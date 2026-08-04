@@ -626,111 +626,25 @@ test_connectivity() {
 }
 
 # ============================================
-# BLOCO 7: CONFIGURAÇÕES BÁSICAS DO SISTEMA
+# BLOCO 7.5: CONFIGURAÇÃO NTP (CORRIGIDA)
 # ============================================
 
-fix_system_dns() {
-    log "Configurando DNS do sistema..."
-    
-    chattr -i /etc/resolv.conf 2>/dev/null || true
-    chattr -i /etc/resolvconf/resolv.conf.d/head 2>/dev/null || true
-    
-    mkdir -p /etc/resolvconf/resolv.conf.d 2>/dev/null
-    
-    local dns_primary="${FIXED_IP}"
-    [ "$INSTALLATION_TYPE" == "secondary" ] && dns_primary="${FIXED_IP}"
-    
-    cat > /etc/resolv.conf << EOF
-nameserver 127.0.0.1
-nameserver ${dns_primary}
-nameserver 8.8.8.8
-nameserver 1.1.1.1
-search ${DOMAIN,,}
-domain ${DOMAIN,,}
-EOF
-    
-    cat > /etc/resolvconf/resolv.conf.d/head << EOF
-nameserver 127.0.0.1
-nameserver ${dns_primary}
-nameserver 8.8.8.8
-nameserver 1.1.1.1
-search ${DOMAIN,,}
-domain ${DOMAIN,,}
-EOF
-    
-    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-        systemctl stop systemd-resolved 2>/dev/null
-        systemctl disable systemd-resolved 2>/dev/null
-        log "systemd-resolved desabilitado"
-    fi
-    
-    chattr +i /etc/resolv.conf 2>/dev/null || true
-    
-    ping -c 1 8.8.8.8 &> /dev/null && success "DNS configurado e funcionando" || warning "DNS configurado, mas teste falhou"
-}
-
-configure_dns_secondary() {
-    header "CONFIGURANDO DNS SECUNDÁRIO"
-    
-    log "Configurando /etc/resolv.conf com o próprio IP como primário..."
-    chattr -i /etc/resolv.conf 2>/dev/null || true
-    rm -f /etc/resolv.conf
-    
-    cat > /etc/resolv.conf << EOF
-nameserver 127.0.0.1
-nameserver ${FIXED_IP}
-nameserver ${PRIMARY_DC_IP}
-nameserver 8.8.8.8
-search ${DOMAIN,,}
-domain ${DOMAIN,,}
-EOF
-    chattr +i /etc/resolv.conf 2>/dev/null || true
-    
-    cat > /etc/hosts << EOF
-127.0.0.1 localhost
-127.0.1.1 ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
-${FIXED_IP} ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
-${FIXED_IP} ${HOSTNAME}
-${PRIMARY_DC_IP} ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,} ${PRIMARY_DC_HOSTNAME}
-EOF
-    
-    success "DNS e hosts configurados - Servidor funcionando independente"
-}
-
-configure_locale() {
-    log "Configurando locale pt_BR..."
-    
-    apt install -y language-pack-pt-base language-pack-pt locales 2>>"$LOG_FILE" || true
-    
-    locale-gen pt_BR.UTF-8 >>"$LOG_FILE" 2>&1
-    
-    update-locale LANG=pt_BR.UTF-8 LANGUAGE=pt_BR:pt LC_ALL=pt_BR.UTF-8 >>"$LOG_FILE" 2>&1
-    
-    export LANG=pt_BR.UTF-8
-    export LANGUAGE=pt_BR:pt
-    export LC_ALL=pt_BR.UTF-8
-    
-    if locale -a 2>/dev/null | grep -q "pt_BR.utf8"; then
-        success "Locale pt_BR.UTF-8 configurado"
-    else
-        warning "Falha ao configurar locale pt_BR.UTF-8, usando fallback"
-        export LANG=en_US.UTF-8
-        export LC_ALL=en_US.UTF-8
-        locale-gen en_US.UTF-8 >>"$LOG_FILE" 2>&1
-    fi
-    
-    timedatectl set-timezone America/Sao_Paulo 2>>"$LOG_FILE" || true
-    success "Timezone configurado: America/Sao_Paulo"
-}
-
 configure_ntp() {
+    header "CONFIGURANDO NTP"
+    
     log "Configurando NTP..."
     
+    # 1. Verificar e instalar chrony
     if ! command -v chrony &> /dev/null && ! command -v chronyd &> /dev/null; then
         log "Chrony não encontrado, instalando..."
-        apt install -y chrony 2>>"$LOG_FILE" || true
+        apt install -y chrony 2>>"$LOG_FILE"
+        if [ $? -ne 0 ]; then
+            warning "Falha ao instalar chrony. Tentando ntp..."
+            apt install -y ntp 2>>"$LOG_FILE"
+        fi
     fi
     
+    # 2. Determinar o arquivo de configuração correto
     local chrony_conf=""
     if [ -f "/etc/chrony/chrony.conf" ]; then
         chrony_conf="/etc/chrony/chrony.conf"
@@ -741,11 +655,14 @@ configure_ntp() {
         chrony_conf="/etc/chrony/chrony.conf"
     fi
     
+    # 3. Determinar servidores NTP
     local ntp_servers="${NTP_SERVER}"
     [ "$INSTALLATION_TYPE" == "secondary" ] && ntp_servers="${PRIMARY_DC_IP} ${NTP_SERVER}"
     
+    # 4. Criar arquivo de configuração
     cat > ${chrony_conf} << EOF
 # Configuração NTP para Samba AD
+# Servidores NTP
 server ${ntp_servers} iburst
 server 0.pool.ntp.org iburst
 server 1.pool.ntp.org iburst
@@ -763,113 +680,116 @@ makestep 1 3
 # Permitir acesso local e da rede local
 allow 127.0.0.1
 allow 192.168.1.0/24
+
+# Log de atividades
+log measurements statistics tracking
 EOF
     
     success "Arquivo NTP criado: ${chrony_conf}"
     
+    # 5. Verificar e iniciar o serviço correto
+    local service_started=false
+    
+    # Tentar chrony primeiro
     if systemctl list-unit-files 2>/dev/null | grep -q "chrony.service"; then
-        systemctl enable chrony >>"$LOG_FILE" 2>&1 || true
-        systemctl restart chrony >>"$LOG_FILE" 2>&1 || true
+        log "Configurando chrony..."
+        systemctl enable chrony >>"$LOG_FILE" 2>&1
+        systemctl restart chrony >>"$LOG_FILE" 2>&1
+        sleep 3
+        
         if systemctl is-active --quiet chrony; then
-            success "NTP configurado com chrony"
+            success "✅ Chrony iniciado com sucesso!"
+            service_started=true
         else
-            warning "Falha ao iniciar chrony"
+            warning "Falha ao iniciar chrony. Verificando logs..."
+            journalctl -u chrony --no-pager | tail -10
         fi
-    elif systemctl list-unit-files 2>/dev/null | grep -q "ntp.service"; then
-        systemctl enable ntp >>"$LOG_FILE" 2>&1 || true
-        systemctl restart ntp >>"$LOG_FILE" 2>&1 || true
-        if systemctl is-active --quiet ntp; then
-            success "NTP configurado com ntp"
-        else
-            warning "Falha ao iniciar ntp"
-        fi
-    else
-        warning "Serviço NTP não encontrado. Instalando ntpdate..."
-        apt install -y ntpdate 2>>"$LOG_FILE" || true
-        ntpdate -u pool.ntp.br 2>/dev/null && success "Hora sincronizada via ntpdate" || warning "Falha na sincronização"
     fi
-}
+    
+    # Se chrony falhou, tentar ntp
+    if [ "$service_started" = false ]; then
+        if systemctl list-unit-files 2>/dev/null | grep -q "ntp.service"; then
+            log "Tentando ntp como fallback..."
+            
+            # Configurar ntp.conf
+            if [ -f "/etc/ntp.conf" ]; then
+                cat > /etc/ntp.conf << EOF
+# Configuração NTP para Samba AD
+server ${ntp_servers} iburst
+server 0.pool.ntp.org iburst
+server 1.pool.ntp.org iburst
+server 2.pool.ntp.org iburst
 
-sync_time() {
-    header "SINCRONIZANDO HORA"
-    
-    log "Sincronizando com o primário..."
-    apt install -y ntpdate 2>/dev/null || true
-    
-    if ntpdate -u ${PRIMARY_DC_IP} 2>/dev/null; then
-        success "Hora sincronizada com o primário"
-    else
-        ntpdate -u pool.ntp.br 2>/dev/null || true
-        [ $? -eq 0 ] && info "Hora sincronizada via internet" || warning "Falha na sincronização de hora"
-    fi
-}
+driftfile /var/lib/ntp/ntp.drift
 
-configure_hostname() {
-    log "Configurando hostname..."
-    hostnamectl set-hostname ${HOSTNAME}.${DOMAIN,,} 2>>"$LOG_FILE"
-    
-    cat > /etc/hosts << EOF
-127.0.0.1 localhost
-127.0.1.1 ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
-${FIXED_IP} ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
-${FIXED_IP} ${HOSTNAME}
+restrict -4 default kod notrap nomodify nopeer noquery
+restrict -6 default kod notrap nomodify nopeer noquery
+restrict 127.0.0.1
+restrict 192.168.1.0 mask 255.255.255.0
 EOF
-
-    [ "$INSTALLATION_TYPE" == "secondary" ] && echo "${PRIMARY_DC_IP} ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,} ${PRIMARY_DC_HOSTNAME}" >> /etc/hosts
-    
-    success "Hostname configurado: ${HOSTNAME}.${DOMAIN,,}"
-}
-
-install_packages() {
-    header "INSTALANDO PACOTES NECESSÁRIOS"
-    
-    log "Atualizando lista de pacotes..."
-    apt update -qq 2>>"$LOG_FILE" || warning "Falha ao atualizar"
-    
-    log "Instalando pacotes essenciais..."
-    DEBIAN_FRONTEND=noninteractive apt install -y -qq \
-        samba samba-dsdb-modules samba-vfs-modules \
-        winbind libpam-winbind libnss-winbind \
-        krb5-user krb5-config \
-        dnsutils bind9-utils ldap-utils \
-        net-tools iputils-ping \
-        acl attr \
-        bash-completion \
-        language-pack-pt-base language-pack-pt locales \
-        chrony \
-        curl wget htop \
-        traceroute mtr nmap tcpdump \
-        sshpass ntpdate \
-        realmd adcli sssd \
-        ufw \
-        2>>"$LOG_FILE"
-    
-    if [ $? -eq 0 ]; then
-        success "Todos os pacotes instalados"
-    else
-        warning "Alguns pacotes podem não ter instalado corretamente"
+            fi
+            
+            systemctl enable ntp >>"$LOG_FILE" 2>&1
+            systemctl restart ntp >>"$LOG_FILE" 2>&1
+            sleep 3
+            
+            if systemctl is-active --quiet ntp; then
+                success "✅ NTP iniciado com sucesso (fallback)!"
+                service_started=true
+            else
+                warning "Falha ao iniciar ntp"
+                journalctl -u ntp --no-pager | tail -10
+            fi
+        fi
     fi
     
-    if command -v samba-tool &> /dev/null; then
-        success "Samba instalado: $(samba-tool --version 2>/dev/null | head -1)"
-    else
-        error "Samba não foi instalado corretamente"
+    # 6. Se ambos falharam, usar ntpdate para sincronização única
+    if [ "$service_started" = false ]; then
+        warning "Serviço NTP não disponível. Usando ntpdate..."
+        apt install -y ntpdate 2>>"$LOG_FILE" || true
+        
+        # Tentar sincronizar com vários servidores
+        log "Sincronizando hora com pool.ntp.br..."
+        ntpdate -u pool.ntp.br 2>/dev/null
+        if [ $? -eq 0 ]; then
+            success "✅ Hora sincronizada via ntpdate"
+        else
+            warning "Falha na sincronização. Tentando com 0.pool.ntp.org..."
+            ntpdate -u 0.pool.ntp.org 2>/dev/null
+            if [ $? -eq 0 ]; then
+                success "✅ Hora sincronizada via ntpdate (fallback)"
+            else
+                warning "Falha em todas as tentativas de sincronização"
+            fi
+        fi
+        
+        # Configurar cron para sincronização periódica
+        cat > /etc/cron.d/ntpdate-sync << EOF
+# Sincronização NTP a cada 1 hora (fallback)
+0 * * * * root /usr/sbin/ntpdate -u pool.ntp.br > /dev/null 2>&1
+EOF
+        chmod 644 /etc/cron.d/ntpdate-sync
+        info "Sincronização via ntpdate configurada (a cada 1 hora)"
     fi
-}
-
-common_setup() {
-    log "Executando configurações comuns..."
     
-    if [ "$INSTALLATION_TYPE" == "secondary" ]; then
-        configure_dns_secondary
-    else
-        fix_system_dns
+    # 7. Verificar horário final
+    echo ""
+    info "Horário atual do sistema:"
+    date
+    echo ""
+    
+    # 8. Verificar se a sincronização está funcionando
+    if [ "$service_started" = true ]; then
+        echo -e "${BLUE}Status do serviço NTP:${NC}"
+        if command -v chronyc &> /dev/null; then
+            chronyc tracking 2>/dev/null | head -5
+        else
+            ntpq -p 2>/dev/null | head -5
+        fi
     fi
+    echo ""
     
-    configure_locale
-    configure_ntp
-    install_packages
-    configure_hostname
+    success "✅ Configuração NTP concluída!"
 }
 
 # ============================================
