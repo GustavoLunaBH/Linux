@@ -1,10 +1,10 @@
 #!/bin/bash
 # ad_controller_setup.sh
 # Script completo para instalação do Samba AD - Controlador de Domínio
-# Versão: 4.3 - Organizado por Blocos Numerados
+# Versão: 4.3 - Com NTP corrigido e verificação de senha
 
 # ============================================
-# BLOCO 1: CORES E CONFIGURAÇÕES GLOBAIS
+# BLOCO 01: CORES E CONFIGURAÇÕES GLOBAIS
 # ============================================
 
 # Cores para output
@@ -43,7 +43,7 @@ OS_INFO=""
 KERNEL_VERSION=""
 
 # ============================================
-# BLOCO 2: FUNÇÕES DE LOG E UTILITÁRIOS
+# BLOCO 02: FUNÇÕES DE LOG E UTILITÁRIOS
 # ============================================
 
 log() {
@@ -112,7 +112,7 @@ press_enter() {
 }
 
 # ============================================
-# BLOCO 3: DETECÇÃO DE SISTEMA
+# BLOCO 03: DETECÇÃO DE SISTEMA
 # ============================================
 
 detect_interface() {
@@ -209,7 +209,7 @@ auto_detect() {
 }
 
 # ============================================
-# BLOCO 4: DETECÇÃO DE SSH
+# BLOCO 04: DETECÇÃO DE SSH
 # ============================================
 
 is_ssh_session() {
@@ -224,7 +224,7 @@ is_ssh_session() {
 }
 
 # ============================================
-# BLOCO 5: GERENCIAMENTO DE REDE (NETPLAN)
+# BLOCO 05: GERENCIAMENTO DE REDE (NETPLAN)
 # ============================================
 
 update_netplan() {
@@ -396,7 +396,7 @@ stop_dhcp_services() {
 }
 
 # ============================================
-# BLOCO 6: CONFIGURAÇÕES DE REDE (MENU)
+# BLOCO 06: CONFIGURAÇÕES DE REDE (MENU)
 # ============================================
 
 configure_network_menu() {
@@ -626,7 +626,105 @@ test_connectivity() {
 }
 
 # ============================================
-# BLOCO 7.5: CONFIGURAÇÃO NTP (CORRIGIDA)
+# BLOCO 07: CONFIGURAÇÕES BÁSICAS DO SISTEMA
+# ============================================
+
+fix_system_dns() {
+    log "Configurando DNS do sistema..."
+    
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    chattr -i /etc/resolvconf/resolv.conf.d/head 2>/dev/null || true
+    
+    mkdir -p /etc/resolvconf/resolv.conf.d 2>/dev/null
+    
+    local dns_primary="${FIXED_IP}"
+    [ "$INSTALLATION_TYPE" == "secondary" ] && dns_primary="${FIXED_IP}"
+    
+    cat > /etc/resolv.conf << EOF
+nameserver 127.0.0.1
+nameserver ${dns_primary}
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+search ${DOMAIN,,}
+domain ${DOMAIN,,}
+EOF
+    
+    cat > /etc/resolvconf/resolv.conf.d/head << EOF
+nameserver 127.0.0.1
+nameserver ${dns_primary}
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+search ${DOMAIN,,}
+domain ${DOMAIN,,}
+EOF
+    
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        systemctl stop systemd-resolved 2>/dev/null
+        systemctl disable systemd-resolved 2>/dev/null
+        log "systemd-resolved desabilitado"
+    fi
+    
+    chattr +i /etc/resolv.conf 2>/dev/null || true
+    
+    ping -c 1 8.8.8.8 &> /dev/null && success "DNS configurado e funcionando" || warning "DNS configurado, mas teste falhou"
+}
+
+configure_dns_secondary() {
+    header "CONFIGURANDO DNS SECUNDÁRIO"
+    
+    log "Configurando /etc/resolv.conf com o próprio IP como primário..."
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    rm -f /etc/resolv.conf
+    
+    cat > /etc/resolv.conf << EOF
+nameserver 127.0.0.1
+nameserver ${FIXED_IP}
+nameserver ${PRIMARY_DC_IP}
+nameserver 8.8.8.8
+search ${DOMAIN,,}
+domain ${DOMAIN,,}
+EOF
+    chattr +i /etc/resolv.conf 2>/dev/null || true
+    
+    cat > /etc/hosts << EOF
+127.0.0.1 localhost
+127.0.1.1 ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
+${FIXED_IP} ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
+${FIXED_IP} ${HOSTNAME}
+${PRIMARY_DC_IP} ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,} ${PRIMARY_DC_HOSTNAME}
+EOF
+    
+    success "DNS e hosts configurados - Servidor funcionando independente"
+}
+
+configure_locale() {
+    log "Configurando locale pt_BR..."
+    
+    apt install -y language-pack-pt-base language-pack-pt locales 2>>"$LOG_FILE" || true
+    
+    locale-gen pt_BR.UTF-8 >>"$LOG_FILE" 2>&1
+    
+    update-locale LANG=pt_BR.UTF-8 LANGUAGE=pt_BR:pt LC_ALL=pt_BR.UTF-8 >>"$LOG_FILE" 2>&1
+    
+    export LANG=pt_BR.UTF-8
+    export LANGUAGE=pt_BR:pt
+    export LC_ALL=pt_BR.UTF-8
+    
+    if locale -a 2>/dev/null | grep -q "pt_BR.utf8"; then
+        success "Locale pt_BR.UTF-8 configurado"
+    else
+        warning "Falha ao configurar locale pt_BR.UTF-8, usando fallback"
+        export LANG=en_US.UTF-8
+        export LC_ALL=en_US.UTF-8
+        locale-gen en_US.UTF-8 >>"$LOG_FILE" 2>&1
+    fi
+    
+    timedatectl set-timezone America/Sao_Paulo 2>>"$LOG_FILE" || true
+    success "Timezone configurado: America/Sao_Paulo"
+}
+
+# ============================================
+# BLOCO 07.5: CONFIGURAÇÃO NTP (CORRIGIDA)
 # ============================================
 
 configure_ntp() {
@@ -792,8 +890,119 @@ EOF
     success "✅ Configuração NTP concluída!"
 }
 
+sync_time() {
+    header "SINCRONIZANDO HORA"
+    
+    log "Sincronizando com o primário..."
+    apt install -y ntpdate 2>/dev/null || true
+    
+    if ntpdate -u ${PRIMARY_DC_IP} 2>/dev/null; then
+        success "Hora sincronizada com o primário"
+    else
+        ntpdate -u pool.ntp.br 2>/dev/null || true
+        [ $? -eq 0 ] && info "Hora sincronizada via internet" || warning "Falha na sincronização de hora"
+    fi
+}
+
+configure_hostname() {
+    log "Configurando hostname..."
+    hostnamectl set-hostname ${HOSTNAME}.${DOMAIN,,} 2>>"$LOG_FILE"
+    
+    cat > /etc/hosts << EOF
+127.0.0.1 localhost
+127.0.1.1 ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
+${FIXED_IP} ${HOSTNAME}.${DOMAIN,,} ${HOSTNAME}
+${FIXED_IP} ${HOSTNAME}
+EOF
+
+    [ "$INSTALLATION_TYPE" == "secondary" ] && echo "${PRIMARY_DC_IP} ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,} ${PRIMARY_DC_HOSTNAME}" >> /etc/hosts
+    
+    success "Hostname configurado: ${HOSTNAME}.${DOMAIN,,}"
+}
+
+install_packages() {
+    header "INSTALANDO PACOTES NECESSÁRIOS"
+    
+    log "Atualizando lista de pacotes..."
+    apt update -qq 2>>"$LOG_FILE" || warning "Falha ao atualizar"
+    
+    log "Instalando pacotes essenciais..."
+    DEBIAN_FRONTEND=noninteractive apt install -y -qq \
+        samba samba-dsdb-modules samba-vfs-modules \
+        winbind libpam-winbind libnss-winbind \
+        krb5-user krb5-config \
+        dnsutils bind9-utils ldap-utils \
+        net-tools iputils-ping \
+        acl attr \
+        bash-completion \
+        language-pack-pt-base language-pack-pt locales \
+        chrony \
+        curl wget htop \
+        traceroute mtr nmap tcpdump \
+        sshpass ntpdate \
+        realmd adcli sssd \
+        ufw \
+        2>>"$LOG_FILE"
+    
+    if [ $? -eq 0 ]; then
+        success "Todos os pacotes instalados"
+    else
+        warning "Alguns pacotes podem não ter instalado corretamente"
+    fi
+    
+    if command -v samba-tool &> /dev/null; then
+        success "Samba instalado: $(samba-tool --version 2>/dev/null | head -1)"
+    else
+        error "Samba não foi instalado corretamente"
+    fi
+}
+
+common_setup() {
+    log "Executando configurações comuns..."
+    
+    if [ "$INSTALLATION_TYPE" == "secondary" ]; then
+        configure_dns_secondary
+    else
+        fix_system_dns
+    fi
+    
+    configure_locale
+    configure_ntp
+    install_packages
+    configure_hostname
+}
+
 # ============================================
-# BLOCO 8: INSTALAÇÃO PRIMÁRIA
+# BLOCO 07.6: VERIFICAR SENHA DO ADMINISTRADOR
+# ============================================
+
+verify_admin_password() {
+    log "Verificando senha do administrador..."
+    
+    # Testar autenticação no ADServer01
+    if ldapsearch -x -H ldap://${PRIMARY_DC_IP} \
+        -D "${ADMIN_USER}@${DOMAIN}" \
+        -w "${ADMIN_PASSWORD}" \
+        -b "dc=${DOMAIN%%.*},dc=${DOMAIN##*.}" \
+        -s base 2>/dev/null | grep -q "dn:"; then
+        success "Senha do administrador válida"
+        return 0
+    else
+        warning "Falha na autenticação. Tentando redefinir senha..."
+        
+        # Tentar redefinir a senha
+        echo "${ADMIN_PASSWORD}" | samba-tool user setpassword ${ADMIN_USER} --newpassword=${ADMIN_PASSWORD} -H ldap://${PRIMARY_DC_IP} 2>/dev/null
+        if [ $? -eq 0 ]; then
+            success "Senha redefinida com sucesso"
+            return 0
+        else
+            error "Não foi possível autenticar. Verifique a senha do administrador."
+        fi
+    fi
+}
+
+# ============================================
+# BLOCO 08: INSTALAÇÃO PRIMÁRIA
 # ============================================
 
 provision_domain() {
@@ -948,7 +1157,7 @@ install_primary() {
 }
 
 # ============================================
-# BLOCO 9: INSTALAÇÃO SECUNDÁRIA
+# BLOCO 09: INSTALAÇÃO SECUNDÁRIA
 # ============================================
 
 remove_dhcp() {
@@ -1028,6 +1237,10 @@ test_kerberos_secondary() {
     fi
 }
 
+# ============================================
+# BLOCO 09.5: JOIN DOMAIN (CORRIGIDO)
+# ============================================
+
 join_domain() {
     header "JUNTANDO AO DOMÍNIO"
     
@@ -1037,8 +1250,73 @@ join_domain() {
     rm -rf /var/lib/samba/private 2>/dev/null || true
     rm -rf /var/lib/samba/sysvol 2>/dev/null || true
     
+    # ============================================
+    # 1. VERIFICAR SENHA ANTES DO JOIN
+    # ============================================
+    
+    log "Verificando credenciais do administrador..."
+    
+    # Criar arquivo de credenciais temporário
+    cat > /tmp/ad_creds << EOF
+username=${ADMIN_USER}
+password=${ADMIN_PASSWORD}
+domain=${DOMAIN}
+EOF
+    chmod 600 /tmp/ad_creds
+    
+    # Testar autenticação LDAP
+    echo -e "${BLUE}Testando autenticação no ADServer01...${NC}"
+    if ldapsearch -x -H ldap://${PRIMARY_DC_IP} \
+        -D "${ADMIN_USER}@${DOMAIN}" \
+        -w "${ADMIN_PASSWORD}" \
+        -b "dc=${DOMAIN%%.*},dc=${DOMAIN##*.}" \
+        -s base 2>/dev/null | grep -q "dn:"; then
+        success "Autenticação LDAP OK"
+    else
+        warning "Falha na autenticação LDAP"
+        echo -e "${YELLOW}Verificando se a senha está correta...${NC}"
+        
+        # Tentar com samba-tool
+        echo "${ADMIN_PASSWORD}" | samba-tool user setpassword ${ADMIN_USER} --newpassword=${ADMIN_PASSWORD} -H ldap://${PRIMARY_DC_IP} 2>/dev/null
+        if [ $? -eq 0 ]; then
+            success "Senha redefinida com sucesso"
+        else
+            error "Não foi possível autenticar. Verifique a senha do administrador."
+        fi
+    fi
+    echo ""
+    
+    # ============================================
+    # 2. AUTENTICAR KERBEROS
+    # ============================================
+    
+    log "Autenticando via Kerberos..."
+    kdestroy 2>/dev/null || true
+    
+    # Tentar autenticar com a senha
+    echo "${ADMIN_PASSWORD}" | kinit ${ADMIN_USER}@${DOMAIN} 2>/dev/null
+    if [ $? -eq 0 ]; then
+        success "Kerberos OK"
+        klist
+    else
+        warning "Falha no Kerberos. Tentando novamente..."
+        sleep 3
+        echo "${ADMIN_PASSWORD}" | kinit ${ADMIN_USER}@${DOMAIN} 2>/dev/null
+        if [ $? -eq 0 ]; then
+            success "Kerberos OK (segunda tentativa)"
+        else
+            warning "Kerberos falhou. Continuando com autenticação por senha..."
+        fi
+    fi
+    echo ""
+    
+    # ============================================
+    # 3. FAZER JOIN COM ARQUIVO DE CREDENCIAIS
+    # ============================================
+    
     log "Fazendo join no domínio..."
     
+    # Método 1: Com arquivo de credenciais
     samba-tool domain join ${DOMAIN,,} DC \
         --server=${PRIMARY_DC_IP} \
         --password=${ADMIN_PASSWORD} \
@@ -1046,35 +1324,96 @@ join_domain() {
         --option="interfaces=lo ${INTERFACE}" \
         --option="bind interfaces only=yes" \
         --option="dns forwarder=${DNS_FORWARDER}" \
+        --use-kerberos=off \
         >>"$LOG_FILE" 2>&1
     
     if [ $? -eq 0 ]; then
         success "Join realizado com sucesso!"
+        rm -f /tmp/ad_creds
         return 0
     fi
     
-    log "Tentando método alternativo (usando DNS)..."
+    # Método 2: Sem Kerberos
+    log "Tentando método sem Kerberos..."
     samba-tool domain join ${DOMAIN,,} DC \
+        --server=${PRIMARY_DC_IP} \
         --password=${ADMIN_PASSWORD} \
         --dns-backend=SAMBA_INTERNAL \
         --option="interfaces=lo ${INTERFACE}" \
         --option="bind interfaces only=yes" \
+        --use-kerberos=off \
         >>"$LOG_FILE" 2>&1
     
     if [ $? -eq 0 ]; then
-        success "Join realizado com sucesso (método DNS)!"
+        success "Join realizado com sucesso (sem Kerberos)!"
+        rm -f /tmp/ad_creds
         return 0
     fi
     
-    log "Tentando método básico..."
+    # Método 3: Com autenticação simples
+    log "Tentando método com autenticação simples..."
+    samba-tool domain join ${DOMAIN,,} DC \
+        --server=${PRIMARY_DC_IP} \
+        --password=${ADMIN_PASSWORD} \
+        --dns-backend=SAMBA_INTERNAL \
+        --option="interfaces=lo ${INTERFACE}" \
+        --option="bind interfaces only=yes" \
+        --use-kerberos=off \
+        --simple-bind-dn="${ADMIN_USER}@${DOMAIN}" \
+        >>"$LOG_FILE" 2>&1
+    
+    if [ $? -eq 0 ]; then
+        success "Join realizado com sucesso (autenticação simples)!"
+        rm -f /tmp/ad_creds
+        return 0
+    fi
+    
+    # Método 4: Join básico (última tentativa)
+    log "Tentando método básico (última tentativa)..."
     samba-tool domain join ${DOMAIN,,} DC \
         --password=${ADMIN_PASSWORD} \
         >>"$LOG_FILE" 2>&1
     
     if [ $? -eq 0 ]; then
         success "Join realizado com sucesso (método básico)!"
+        rm -f /tmp/ad_creds
         return 0
     fi
+    
+    # ============================================
+    # 4. SE TUDO FALHAR, DIAGNOSTICAR
+    # ============================================
+    
+    echo ""
+    echo -e "${RED}❌ TODAS AS TENTATIVAS DE JOIN FALHARAM!${NC}"
+    echo ""
+    echo -e "${YELLOW}Diagnóstico:${NC}"
+    
+    # Verificar conectividade
+    echo -e "  ${BLUE}1. Conectividade:${NC}"
+    ping -c 2 ${PRIMARY_DC_IP} 2>/dev/null && echo "    ✅ Primário acessível" || echo "    ❌ Primário inacessível"
+    echo ""
+    
+    # Verificar portas
+    echo -e "  ${BLUE}2. Portas:${NC}"
+    for porta in 445 389 88 53; do
+        nc -zv ${PRIMARY_DC_IP} $porta 2>/dev/null && echo "    ✅ Porta $porta OK" || echo "    ❌ Porta $porta FALHA"
+    done
+    echo ""
+    
+    # Verificar DNS
+    echo -e "  ${BLUE}3. DNS:${NC}"
+    nslookup ${DOMAIN,,} 2>/dev/null | grep -q "Address" && echo "    ✅ Domínio resolvido" || echo "    ❌ Domínio NÃO resolvido"
+    echo ""
+    
+    # Verificar senha
+    echo -e "  ${BLUE}4. Senha:${NC}"
+    echo "    A senha informada foi: ${ADMIN_PASSWORD}"
+    echo "    Verifique se está correta no ADServer01"
+    echo ""
+    
+    # Remover arquivo de credenciais
+    rm -f /tmp/ad_creds
     
     error "Falha no join. Verifique o log: $LOG_FILE"
 }
@@ -1165,6 +1504,10 @@ install_secondary() {
     configure_kerberos_secondary
     test_connection
     test_kerberos_secondary
+    
+    # Verificar senha antes do join
+    verify_admin_password
+    
     join_domain
     configure_samba_secondary
     configure_firewall
