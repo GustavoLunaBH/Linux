@@ -1785,7 +1785,7 @@ finalize_installation() {
 }
 
 # ============================================
-# BLOCO 12: COLETA DE CONFIGURAÇÕES (INTELIGENTE - CORRIGIDO)
+# BLOCO 12: COLETA DE CONFIGURAÇÕES (VERSÃO ORIGINAL)
 # ============================================
 
 collect_configurations() {
@@ -1824,56 +1824,41 @@ collect_configurations() {
     [ -z "$DNS_FORWARDER" ] && DNS_FORWARDER="8.8.8.8"
     
     # ============================================
-    # CONFIGURAÇÕES INTELIGENTES DO PRIMÁRIO
+    # CONFIGURAÇÕES DO PRIMÁRIO (COM DETECÇÃO)
     # ============================================
     
     if [ "$INSTALLATION_TYPE" == "secondary" ]; then
         echo ""
         echo -e "${YELLOW}📌 Configurações do DC Primário:${NC}"
         
-        # === BUSCAR IP DO PRIMÁRIO AUTOMATICAMENTE ===
+        # === DETECTAR IP DO PRIMÁRIO ===
         echo -e "${BLUE}🔍 Detectando IP do primário automaticamente...${NC}"
         
         PRIMARY_DETECTED_IP=""
         
-        # Método 1: Usar nslookup do domínio (ignorando 127.0.0.1)
+        # Método 1: Usar nslookup do domínio
         if [ -n "$DOMAIN" ]; then
             PRIMARY_DETECTED_IP=$(nslookup ${DOMAIN,,} 2>/dev/null | grep "Address" | grep -v "127.0.0.1" | grep -v "#53" | tail -1 | awk '{print $2}')
         fi
         
-        # Método 2: Usar host (ignorando 127.0.0.1)
+        # Método 2: Usar host
         if [ -z "$PRIMARY_DETECTED_IP" ] || [ "$PRIMARY_DETECTED_IP" = "127.0.0.53" ]; then
             PRIMARY_DETECTED_IP=$(host ${DOMAIN,,} 2>/dev/null | grep "has address" | grep -v "127.0.0.1" | head -1 | awk '{print $4}')
         fi
         
-        # Método 3: Usar dig (ignorando 127.0.0.1)
+        # Método 3: Usar dig
         if [ -z "$PRIMARY_DETECTED_IP" ] || [ "$PRIMARY_DETECTED_IP" = "127.0.0.53" ]; then
             PRIMARY_DETECTED_IP=$(dig +short ${DOMAIN,,} 2>/dev/null | grep -v "127.0.0.1" | head -1)
-        fi
-        
-        # Método 4: Usar samba-tool domain info (se disponível)
-        if [ -z "$PRIMARY_DETECTED_IP" ] || [ "$PRIMARY_DETECTED_IP" = "127.0.0.53" ]; then
-            if command -v samba-tool &> /dev/null; then
-                PRIMARY_DETECTED_IP=$(samba-tool domain info 127.0.0.1 2>/dev/null | grep "DC name" | awk '{print $NF}' | cut -d'.' -f1 | xargs -I {} dig +short {}.${DOMAIN,,} 2>/dev/null | grep -v "127.0.0.1" | head -1)
-            fi
-        fi
-        
-        # Método 5: Tentar descobrir via nmap (escaneamento rápido)
-        if [ -z "$PRIMARY_DETECTED_IP" ] || [ "$PRIMARY_DETECTED_IP" = "127.0.0.53" ]; then
-            if command -v nmap &> /dev/null; then
-                PRIMARY_DETECTED_IP=$(nmap -p 389 --open 192.168.1.0/24 2>/dev/null | grep "389/tcp" -B2 | grep "Nmap scan" | awk '{print $5}' | head -1)
-            fi
         fi
         
         # Se encontrou, validar
         if [ -n "$PRIMARY_DETECTED_IP" ] && [ "$PRIMARY_DETECTED_IP" != "127.0.0.53" ] && [ "$PRIMARY_DETECTED_IP" != "127.0.0.1" ]; then
             echo -e "  ${GREEN}✅ IP detectado: ${CYAN}${PRIMARY_DETECTED_IP}${NC}"
             
-            # Verificar se o IP está respondendo
             if ping -c 2 ${PRIMARY_DETECTED_IP} &> /dev/null; then
                 echo -e "  ${GREEN}✅ Servidor respondendo${NC}"
                 
-                # Tentar descobrir o hostname via DNS reverso
+                # Tentar descobrir o hostname
                 PRIMARY_DETECTED_HOSTNAME=$(nslookup ${PRIMARY_DETECTED_IP} 2>/dev/null | grep "name" | awk '{print $4}' | sed 's/\.$//' | cut -d'.' -f1)
                 if [ -n "$PRIMARY_DETECTED_HOSTNAME" ] && [ "$PRIMARY_DETECTED_HOSTNAME" != "$HOSTNAME" ]; then
                     echo -e "  ${GREEN}✅ Hostname detectado: ${CYAN}${PRIMARY_DETECTED_HOSTNAME}${NC}"
@@ -1885,11 +1870,7 @@ collect_configurations() {
                         PRIMARY_DC_HOSTNAME="$PRIMARY_DETECTED_HOSTNAME"
                         success "Configurações do primário definidas automaticamente!"
                     fi
-                else
-                    echo -e "  ${YELLOW}⚠️  Hostname não detectado ou igual ao atual${NC}"
                 fi
-            else
-                echo -e "  ${YELLOW}⚠️  IP detectado mas não está respondendo${NC}"
             fi
         else
             echo -e "  ${YELLOW}⚠️  Não foi possível detectar o IP do primário automaticamente${NC}"
@@ -1905,9 +1886,8 @@ collect_configurations() {
             # Validar que não é o próprio IP
             if [ "$PRIMARY_DC_IP" == "$FIXED_IP" ]; then
                 echo -e "${RED}❌ O IP do primário não pode ser o mesmo do secundário!${NC}"
-                echo -e "${BLUE}Digite o IP do primário [${PRIMARY_DC_IP}]:${NC}"
-                read -p "> " PRIMARY_IP_INPUT
-                [ -n "$PRIMARY_IP_INPUT" ] && PRIMARY_DC_IP="$PRIMARY_IP_INPUT"
+                echo -e "${BLUE}Digite o IP do primário:${NC}"
+                read -p "> " PRIMARY_DC_IP
             fi
             
             echo -e "${BLUE}Digite o hostname do primário [${PRIMARY_DC_HOSTNAME}]:${NC}"
@@ -1918,26 +1898,24 @@ collect_configurations() {
             # Validar que o hostname não é o mesmo
             if [ "$PRIMARY_DC_HOSTNAME" == "$HOSTNAME" ]; then
                 echo -e "${RED}❌ O hostname do primário não pode ser o mesmo do secundário!${NC}"
-                echo -e "${BLUE}Digite o hostname do primário [${PRIMARY_DC_HOSTNAME}]:${NC}"
-                read -p "> " PRIMARY_HOST_INPUT
-                [ -n "$PRIMARY_HOST_INPUT" ] && PRIMARY_DC_HOSTNAME="$PRIMARY_HOST_INPUT"
+                echo -e "${BLUE}Digite o hostname do primário:${NC}"
+                read -p "> " PRIMARY_DC_HOSTNAME
                 PRIMARY_DC_HOSTNAME=$(echo $PRIMARY_DC_HOSTNAME | tr '[:upper:]' '[:lower:]')
             fi
         fi
         
-        # Validar configurações finais
+        # Mostrar configurações finais
         echo ""
         echo -e "${BLUE}✅ Configurações do primário:${NC}"
         echo -e "  IP: ${CYAN}${PRIMARY_DC_IP}${NC}"
         echo -e "  Hostname: ${CYAN}${PRIMARY_DC_HOSTNAME}${NC}"
         echo ""
         
-        # Verificar se o primário está acessível
+        # Verificar conectividade
         echo -e "${BLUE}🔍 Verificando conectividade com o primário...${NC}"
         if ping -c 2 ${PRIMARY_DC_IP} &> /dev/null; then
             success "Primário acessível"
             
-            # Verificar portas
             echo -e "${BLUE}Verificando portas do primário...${NC}"
             for porta in 445 389 88 53; do
                 if nc -zv ${PRIMARY_DC_IP} $porta 2>/dev/null; then
@@ -1953,7 +1931,7 @@ collect_configurations() {
     fi
     
     # ============================================
-    # VALIDAÇÃO DE SENHA INTELIGENTE
+    # SOLICITAR SENHA (SEM VALIDAÇÃO LDAP)
     # ============================================
     
     echo ""
@@ -1981,41 +1959,8 @@ collect_configurations() {
             continue
         fi
         
-        # ============================================
-        # VALIDAR SENHA NO ADServer01 (se for secundário)
-        # ============================================
-        
-        if [ "$INSTALLATION_TYPE" == "secondary" ] && [ -n "$PRIMARY_DC_IP" ] && [ "$PRIMARY_DC_IP" != "$FIXED_IP" ]; then
-            echo ""
-            echo -e "${BLUE}🔍 Validando senha no ADServer01...${NC}"
-            
-            # Testar autenticação LDAP
-            if ldapsearch -x -H ldap://${PRIMARY_DC_IP} \
-                -D "${ADMIN_USER}@${DOMAIN}" \
-                -w "${ADMIN_PASSWORD}" \
-                -b "dc=${DOMAIN%%.*},dc=${DOMAIN##*.}" \
-                -s base 2>/dev/null | grep -q "dn:"; then
-                echo -e "${GREEN}✅ Senha validada com sucesso no ADServer01!${NC}"
-                break
-            else
-                echo -e "${RED}❌ Falha na autenticação no ADServer01!${NC}"
-                echo -e "${YELLOW}   Verifique:${NC}"
-                echo -e "   1. O IP do primário está correto (${PRIMARY_DC_IP})"
-                echo -e "   2. A senha está correta"
-                echo -e "   3. O ADServer01 está rodando"
-                echo ""
-                read -p "Deseja tentar novamente? (S/n): " -n 1 -r
-                echo
-                if [[ $REPLY =~ ^[Nn]$ ]]; then
-                    error "Senha não validada. Instalação cancelada."
-                fi
-                continue
-            fi
-        elif [ "$INSTALLATION_TYPE" == "secondary" ] && [ "$PRIMARY_DC_IP" == "$FIXED_IP" ]; then
-            echo -e "${RED}❌ O IP do primário não pode ser o mesmo do secundário!${NC}"
-            error "Corrija o IP do primário antes de continuar."
-        else
-            # Para primário, apenas validar a força da senha
+        # Para primário, validar força da senha
+        if [ "$INSTALLATION_TYPE" == "primary" ]; then
             if [[ "$ADMIN_PASSWORD" =~ [A-Z] ]] && [[ "$ADMIN_PASSWORD" =~ [a-z] ]] && [[ "$ADMIN_PASSWORD" =~ [0-9] ]]; then
                 echo -e "${GREEN}✅ Senha forte (contém maiúscula, minúscula e número)${NC}"
                 break
@@ -2029,6 +1974,10 @@ collect_configurations() {
                 echo ""
                 continue
             fi
+        else
+            # Para secundário, apenas confirmar (sem validação LDAP)
+            echo -e "${GREEN}✅ Senha confirmada${NC}"
+            break
         fi
     done
     
@@ -2036,12 +1985,11 @@ collect_configurations() {
     # ARMAZENAR SENHA PARA TODO O PROCESSO
     # ============================================
     
-    # Exportar senha para uso em todo o script
     export ADMIN_PASSWORD
     export ADMIN_USER
     export DOMAIN
     
-    # Criar arquivo de credenciais para uso posterior
+    # Criar arquivo de credenciais
     cat > /tmp/ad_creds << EOF
 username=${ADMIN_USER}
 password=${ADMIN_PASSWORD}
@@ -2075,6 +2023,7 @@ EOF
         error "Instalação cancelada pelo usuário"
     fi
 }
+
 # ============================================
 # BLOCO 13: MENU PRINCIPAL
 # ============================================
