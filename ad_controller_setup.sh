@@ -1,7 +1,7 @@
 #!/bin/bash
 # ad_controller_setup.sh
 # Script completo para instalação do Samba AD - Controlador de Domínio
-# Versão: 4.3 - Com NTP corrigido e verificação de senha
+# Versão: 4.4 - Com detecção automática do primário e validação de senha
 
 # ============================================
 # BLOCO 01: CORES E CONFIGURAÇÕES GLOBAIS
@@ -33,7 +33,7 @@ PRIMARY_DC_IP="192.168.1.2"
 PRIMARY_DC_HOSTNAME="adserver01"
 SECONDARY_DC_IP="192.168.1.3"
 SECONDARY_DC_HOSTNAME="adserver02"
-SCRIPT_VERSION="4.3"
+SCRIPT_VERSION="4.4"
 LOG_FILE="/tmp/ad_setup_$(date +%Y%m%d_%H%M%S).log"
 INSTALLATION_TYPE=""
 HOSTNAME=""
@@ -724,7 +724,7 @@ configure_locale() {
 }
 
 # ============================================
-# BLOCO 07.5: CONFIGURAÇÃO NTP (CORRIGIDA)
+# BLOCO 07.5: CONFIGURAÇÃO NTP (CORRIGIDA E ROBUSTA)
 # ============================================
 
 configure_ntp() {
@@ -732,9 +732,17 @@ configure_ntp() {
     
     log "Configurando NTP..."
     
-    # 1. Verificar e instalar chrony
+    # 1. Parar serviços conflitantes
+    log "Parando serviços conflitantes..."
+    systemctl stop chrony 2>/dev/null || true
+    systemctl stop ntp 2>/dev/null || true
+    systemctl stop systemd-timesyncd 2>/dev/null || true
+    sleep 2
+    
+    # 2. Instalar chrony
     if ! command -v chrony &> /dev/null && ! command -v chronyd &> /dev/null; then
         log "Chrony não encontrado, instalando..."
+        apt update -qq 2>>"$LOG_FILE" || true
         apt install -y chrony 2>>"$LOG_FILE"
         if [ $? -ne 0 ]; then
             warning "Falha ao instalar chrony. Tentando ntp..."
@@ -742,7 +750,7 @@ configure_ntp() {
         fi
     fi
     
-    # 2. Determinar o arquivo de configuração correto
+    # 3. Determinar arquivo de configuração
     local chrony_conf=""
     if [ -f "/etc/chrony/chrony.conf" ]; then
         chrony_conf="/etc/chrony/chrony.conf"
@@ -753,11 +761,19 @@ configure_ntp() {
         chrony_conf="/etc/chrony/chrony.conf"
     fi
     
-    # 3. Determinar servidores NTP
+    # 4. Determinar servidores NTP
     local ntp_servers="${NTP_SERVER}"
     [ "$INSTALLATION_TYPE" == "secondary" ] && ntp_servers="${PRIMARY_DC_IP} ${NTP_SERVER}"
     
-    # 4. Criar arquivo de configuração
+    # Se o primário não estiver acessível, usar pool público
+    if [ "$INSTALLATION_TYPE" == "secondary" ]; then
+        if ! ping -c 1 ${PRIMARY_DC_IP} &> /dev/null; then
+            warning "Primário não acessível. Usando pool público para NTP..."
+            ntp_servers="pool.ntp.br 0.pool.ntp.org 1.pool.ntp.org"
+        fi
+    fi
+    
+    # 5. Criar arquivo de configuração
     cat > ${chrony_conf} << EOF
 # Configuração NTP para Samba AD
 # Servidores NTP
@@ -781,35 +797,39 @@ allow 192.168.1.0/24
 
 # Log de atividades
 log measurements statistics tracking
+
+# Configurações adicionais
+maxupdateskew 100.0
+rtcsync
 EOF
     
     success "Arquivo NTP criado: ${chrony_conf}"
     
-    # 5. Verificar e iniciar o serviço correto
+    # 6. Iniciar chrony
     local service_started=false
     
-    # Tentar chrony primeiro
     if systemctl list-unit-files 2>/dev/null | grep -q "chrony.service"; then
-        log "Configurando chrony..."
+        log "Iniciando chrony..."
+        systemctl daemon-reload 2>/dev/null
         systemctl enable chrony >>"$LOG_FILE" 2>&1
-        systemctl restart chrony >>"$LOG_FILE" 2>&1
-        sleep 3
+        systemctl start chrony >>"$LOG_FILE" 2>&1
+        sleep 5
         
         if systemctl is-active --quiet chrony; then
             success "✅ Chrony iniciado com sucesso!"
             service_started=true
+            chronyc -a makestep 2>/dev/null || true
         else
             warning "Falha ao iniciar chrony. Verificando logs..."
             journalctl -u chrony --no-pager | tail -10
         fi
     fi
     
-    # Se chrony falhou, tentar ntp
+    # 7. Fallback para ntp
     if [ "$service_started" = false ]; then
         if systemctl list-unit-files 2>/dev/null | grep -q "ntp.service"; then
             log "Tentando ntp como fallback..."
             
-            # Configurar ntp.conf
             if [ -f "/etc/ntp.conf" ]; then
                 cat > /etc/ntp.conf << EOF
 # Configuração NTP para Samba AD
@@ -829,7 +849,7 @@ EOF
             
             systemctl enable ntp >>"$LOG_FILE" 2>&1
             systemctl restart ntp >>"$LOG_FILE" 2>&1
-            sleep 3
+            sleep 5
             
             if systemctl is-active --quiet ntp; then
                 success "✅ NTP iniciado com sucesso (fallback)!"
@@ -841,27 +861,28 @@ EOF
         fi
     fi
     
-    # 6. Se ambos falharam, usar ntpdate para sincronização única
+    # 8. Fallback para ntpdate
     if [ "$service_started" = false ]; then
         warning "Serviço NTP não disponível. Usando ntpdate..."
         apt install -y ntpdate 2>>"$LOG_FILE" || true
         
-        # Tentar sincronizar com vários servidores
-        log "Sincronizando hora com pool.ntp.br..."
-        ntpdate -u pool.ntp.br 2>/dev/null
-        if [ $? -eq 0 ]; then
-            success "✅ Hora sincronizada via ntpdate"
-        else
-            warning "Falha na sincronização. Tentando com 0.pool.ntp.org..."
-            ntpdate -u 0.pool.ntp.org 2>/dev/null
+        local ntp_servers_public="pool.ntp.br 0.pool.ntp.org 1.pool.ntp.org time.nist.gov"
+        local synced=false
+        
+        for server in $ntp_servers_public; do
+            log "Tentando sincronizar com $server..."
+            ntpdate -u $server 2>/dev/null
             if [ $? -eq 0 ]; then
-                success "✅ Hora sincronizada via ntpdate (fallback)"
-            else
-                warning "Falha em todas as tentativas de sincronização"
+                success "✅ Hora sincronizada com $server"
+                synced=true
+                break
             fi
+        done
+        
+        if [ "$synced" = false ]; then
+            warning "Falha em todas as tentativas de sincronização"
         fi
         
-        # Configurar cron para sincronização periódica
         cat > /etc/cron.d/ntpdate-sync << EOF
 # Sincronização NTP a cada 1 hora (fallback)
 0 * * * * root /usr/sbin/ntpdate -u pool.ntp.br > /dev/null 2>&1
@@ -870,22 +891,40 @@ EOF
         info "Sincronização via ntpdate configurada (a cada 1 hora)"
     fi
     
-    # 7. Verificar horário final
+    # 9. Verificar horário final
     echo ""
     info "Horário atual do sistema:"
     date
     echo ""
     
-    # 8. Verificar se a sincronização está funcionando
+    # 10. Verificar sincronização
     if [ "$service_started" = true ]; then
         echo -e "${BLUE}Status do serviço NTP:${NC}"
         if command -v chronyc &> /dev/null; then
-            chronyc tracking 2>/dev/null | head -5
+            chronyc tracking 2>/dev/null | head -5 || echo "  Aguardando sincronização..."
         else
-            ntpq -p 2>/dev/null | head -5
+            ntpq -p 2>/dev/null | head -5 || echo "  Aguardando sincronização..."
         fi
+    else
+        echo -e "${YELLOW}⚠️  Usando ntpdate para sincronização${NC}"
     fi
     echo ""
+    
+    # 11. Verificar diferença de horário com o primário
+    if [ "$INSTALLATION_TYPE" == "secondary" ] && [ -n "$PRIMARY_DC_IP" ]; then
+        log "Verificando diferença de horário com o primário..."
+        local time_diff=$(ntpdate -q ${PRIMARY_DC_IP} 2>/dev/null | grep "offset" | awk '{print $6}')
+        if [ -n "$time_diff" ]; then
+            echo -e "  Diferença de horário: ${time_diff} segundos"
+            if (( $(echo "$time_diff > 5" | bc -l) )); then
+                warning "⚠️  Diferença de horário maior que 5 segundos! Sincronizando..."
+                ntpdate -u ${PRIMARY_DC_IP} 2>/dev/null
+            else
+                success "✅ Horário sincronizado com o primário"
+            fi
+        fi
+        echo ""
+    fi
     
     success "✅ Configuração NTP concluída!"
 }
@@ -1256,14 +1295,6 @@ join_domain() {
     
     log "Verificando credenciais do administrador..."
     
-    # Criar arquivo de credenciais temporário
-    cat > /tmp/ad_creds << EOF
-username=${ADMIN_USER}
-password=${ADMIN_PASSWORD}
-domain=${DOMAIN}
-EOF
-    chmod 600 /tmp/ad_creds
-    
     # Testar autenticação LDAP
     echo -e "${BLUE}Testando autenticação no ADServer01...${NC}"
     if ldapsearch -x -H ldap://${PRIMARY_DC_IP} \
@@ -1311,12 +1342,12 @@ EOF
     echo ""
     
     # ============================================
-    # 3. FAZER JOIN COM ARQUIVO DE CREDENCIAIS
+    # 3. FAZER JOIN
     # ============================================
     
     log "Fazendo join no domínio..."
     
-    # Método 1: Com arquivo de credenciais
+    # Método 1: Com senha e sem Kerberos
     samba-tool domain join ${DOMAIN,,} DC \
         --server=${PRIMARY_DC_IP} \
         --password=${ADMIN_PASSWORD} \
@@ -1329,14 +1360,12 @@ EOF
     
     if [ $? -eq 0 ]; then
         success "Join realizado com sucesso!"
-        rm -f /tmp/ad_creds
         return 0
     fi
     
-    # Método 2: Sem Kerberos
-    log "Tentando método sem Kerberos..."
+    # Método 2: Sem servidor específico
+    log "Tentando método sem servidor específico..."
     samba-tool domain join ${DOMAIN,,} DC \
-        --server=${PRIMARY_DC_IP} \
         --password=${ADMIN_PASSWORD} \
         --dns-backend=SAMBA_INTERNAL \
         --option="interfaces=lo ${INTERFACE}" \
@@ -1345,30 +1374,11 @@ EOF
         >>"$LOG_FILE" 2>&1
     
     if [ $? -eq 0 ]; then
-        success "Join realizado com sucesso (sem Kerberos)!"
-        rm -f /tmp/ad_creds
+        success "Join realizado com sucesso (método DNS)!"
         return 0
     fi
     
-    # Método 3: Com autenticação simples
-    log "Tentando método com autenticação simples..."
-    samba-tool domain join ${DOMAIN,,} DC \
-        --server=${PRIMARY_DC_IP} \
-        --password=${ADMIN_PASSWORD} \
-        --dns-backend=SAMBA_INTERNAL \
-        --option="interfaces=lo ${INTERFACE}" \
-        --option="bind interfaces only=yes" \
-        --use-kerberos=off \
-        --simple-bind-dn="${ADMIN_USER}@${DOMAIN}" \
-        >>"$LOG_FILE" 2>&1
-    
-    if [ $? -eq 0 ]; then
-        success "Join realizado com sucesso (autenticação simples)!"
-        rm -f /tmp/ad_creds
-        return 0
-    fi
-    
-    # Método 4: Join básico (última tentativa)
+    # Método 3: Join básico
     log "Tentando método básico (última tentativa)..."
     samba-tool domain join ${DOMAIN,,} DC \
         --password=${ADMIN_PASSWORD} \
@@ -1376,7 +1386,6 @@ EOF
     
     if [ $? -eq 0 ]; then
         success "Join realizado com sucesso (método básico)!"
-        rm -f /tmp/ad_creds
         return 0
     fi
     
@@ -1411,9 +1420,6 @@ EOF
     echo "    A senha informada foi: ${ADMIN_PASSWORD}"
     echo "    Verifique se está correta no ADServer01"
     echo ""
-    
-    # Remover arquivo de credenciais
-    rm -f /tmp/ad_creds
     
     error "Falha no join. Verifique o log: $LOG_FILE"
 }
@@ -1779,7 +1785,7 @@ finalize_installation() {
 }
 
 # ============================================
-# BLOCO 12: COLETA DE CONFIGURAÇÕES
+# BLOCO 12: COLETA DE CONFIGURAÇÕES (INTELIGENTE)
 # ============================================
 
 collect_configurations() {
@@ -1817,18 +1823,87 @@ collect_configurations() {
     read -p "> " DNS_FORWARDER
     [ -z "$DNS_FORWARDER" ] && DNS_FORWARDER="8.8.8.8"
     
+    # ============================================
+    # CONFIGURAÇÕES INTELIGENTES DO PRIMÁRIO
+    # ============================================
+    
     if [ "$INSTALLATION_TYPE" == "secondary" ]; then
         echo ""
         echo -e "${YELLOW}📌 Configurações do DC Primário:${NC}"
-        echo -e "${BLUE}Digite o IP do primário [${PRIMARY_DC_IP}]:${NC}"
-        read -p "> " PRIMARY_IP_INPUT
-        [ -n "$PRIMARY_IP_INPUT" ] && PRIMARY_DC_IP="$PRIMARY_IP_INPUT"
         
-        echo -e "${BLUE}Digite o hostname do primário [${PRIMARY_DC_HOSTNAME}]:${NC}"
-        read -p "> " PRIMARY_HOST_INPUT
-        [ -n "$PRIMARY_HOST_INPUT" ] && PRIMARY_DC_HOSTNAME="$PRIMARY_HOST_INPUT"
-        PRIMARY_DC_HOSTNAME=$(echo $PRIMARY_DC_HOSTNAME | tr '[:upper:]' '[:lower:]')
+        # === BUSCAR IP DO PRIMÁRIO AUTOMATICAMENTE ===
+        echo -e "${BLUE}🔍 Detectando IP do primário automaticamente...${NC}"
+        
+        # Tentar descobrir o IP do primário via DNS
+        PRIMARY_DETECTED_IP=""
+        
+        # Método 1: Usar nslookup do domínio
+        if [ -n "$DOMAIN" ]; then
+            PRIMARY_DETECTED_IP=$(nslookup ${DOMAIN,,} 2>/dev/null | grep "Address" | grep -v "127.0.0.1" | tail -1 | awk '{print $2}')
+        fi
+        
+        # Método 2: Usar host
+        if [ -z "$PRIMARY_DETECTED_IP" ]; then
+            PRIMARY_DETECTED_IP=$(host ${DOMAIN,,} 2>/dev/null | grep "has address" | head -1 | awk '{print $4}')
+        fi
+        
+        # Método 3: Usar dig
+        if [ -z "$PRIMARY_DETECTED_IP" ]; then
+            PRIMARY_DETECTED_IP=$(dig +short ${DOMAIN,,} 2>/dev/null | head -1)
+        fi
+        
+        # Se encontrou, validar
+        if [ -n "$PRIMARY_DETECTED_IP" ]; then
+            echo -e "  ${GREEN}✅ IP detectado: ${CYAN}${PRIMARY_DETECTED_IP}${NC}"
+            
+            # Verificar se o IP está respondendo
+            if ping -c 2 ${PRIMARY_DETECTED_IP} &> /dev/null; then
+                echo -e "  ${GREEN}✅ Servidor respondendo${NC}"
+                
+                # Tentar descobrir o hostname via DNS reverso
+                PRIMARY_DETECTED_HOSTNAME=$(nslookup ${PRIMARY_DETECTED_IP} 2>/dev/null | grep "name" | awk '{print $4}' | sed 's/\.$//')
+                if [ -n "$PRIMARY_DETECTED_HOSTNAME" ]; then
+                    echo -e "  ${GREEN}✅ Hostname detectado: ${CYAN}${PRIMARY_DETECTED_HOSTNAME}${NC}"
+                    echo ""
+                    read -p "Deseja usar estas configurações? (S/n): " -n 1 -r
+                    echo
+                    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                        PRIMARY_DC_IP="$PRIMARY_DETECTED_IP"
+                        PRIMARY_DC_HOSTNAME="$PRIMARY_DETECTED_HOSTNAME"
+                        success "Configurações do primário definidas automaticamente!"
+                    fi
+                fi
+            fi
+        fi
+        
+        # Se não encontrou ou o usuário optou por manual
+        if [ -z "$PRIMARY_DC_IP" ] || { [ "$PRIMARY_DC_IP" == "$PRIMARY_DETECTED_IP" ] && [ -n "$PRIMARY_DETECTED_IP" ] && [[ ! $REPLY =~ ^[Nn]$ ]]; }; then
+            # Já foi definido automaticamente
+            echo ""
+        else
+            # Entrada manual
+            echo ""
+            echo -e "${BLUE}Digite o IP do primário [${PRIMARY_DC_IP}]:${NC}"
+            read -p "> " PRIMARY_IP_INPUT
+            [ -n "$PRIMARY_IP_INPUT" ] && PRIMARY_DC_IP="$PRIMARY_IP_INPUT"
+            
+            echo -e "${BLUE}Digite o hostname do primário [${PRIMARY_DC_HOSTNAME}]:${NC}"
+            read -p "> " PRIMARY_HOST_INPUT
+            [ -n "$PRIMARY_HOST_INPUT" ] && PRIMARY_DC_HOSTNAME="$PRIMARY_HOST_INPUT"
+            PRIMARY_DC_HOSTNAME=$(echo $PRIMARY_DC_HOSTNAME | tr '[:upper:]' '[:lower:]')
+        fi
+        
+        # Validar configurações
+        echo ""
+        echo -e "${BLUE}✅ Configurações do primário:${NC}"
+        echo -e "  IP: ${CYAN}${PRIMARY_DC_IP}${NC}"
+        echo -e "  Hostname: ${CYAN}${PRIMARY_DC_HOSTNAME}${NC}"
+        echo ""
     fi
+    
+    # ============================================
+    # VALIDAÇÃO DE SENHA INTELIGENTE
+    # ============================================
     
     echo ""
     while true; do
@@ -1841,13 +1916,84 @@ collect_configurations() {
         read -s -p "> " ADMIN_PASSWORD_CONFIRM
         echo ""
         
-        if [ "$ADMIN_PASSWORD" = "$ADMIN_PASSWORD_CONFIRM" ] && [ ${#ADMIN_PASSWORD} -ge 8 ]; then
-            break
-        else
-            echo -e "${RED}Senhas não coincidem ou são muito curtas!${NC}"
+        # Verificar se a senha tem pelo menos 8 caracteres
+        if [ ${#ADMIN_PASSWORD} -lt 8 ]; then
+            echo -e "${RED}❌ Senha muito curta! Mínimo 8 caracteres.${NC}"
             echo ""
+            continue
+        fi
+        
+        # Verificar se as senhas coincidem
+        if [ "$ADMIN_PASSWORD" != "$ADMIN_PASSWORD_CONFIRM" ]; then
+            echo -e "${RED}❌ Senhas não coincidem!${NC}"
+            echo ""
+            continue
+        fi
+        
+        # ============================================
+        # VALIDAR SENHA NO ADServer01 (se for secundário)
+        # ============================================
+        
+        if [ "$INSTALLATION_TYPE" == "secondary" ] && [ -n "$PRIMARY_DC_IP" ]; then
+            echo ""
+            echo -e "${BLUE}🔍 Validando senha no ADServer01...${NC}"
+            
+            # Testar autenticação LDAP
+            if ldapsearch -x -H ldap://${PRIMARY_DC_IP} \
+                -D "${ADMIN_USER}@${DOMAIN}" \
+                -w "${ADMIN_PASSWORD}" \
+                -b "dc=${DOMAIN%%.*},dc=${DOMAIN##*.}" \
+                -s base 2>/dev/null | grep -q "dn:"; then
+                echo -e "${GREEN}✅ Senha validada com sucesso no ADServer01!${NC}"
+                break
+            else
+                echo -e "${RED}❌ Falha na autenticação no ADServer01!${NC}"
+                echo -e "${YELLOW}   Verifique:${NC}"
+                echo -e "   1. O IP do primário está correto (${PRIMARY_DC_IP})"
+                echo -e "   2. A senha está correta"
+                echo -e "   3. O ADServer01 está rodando"
+                echo ""
+                read -p "Deseja tentar novamente? (S/n): " -n 1 -r
+                echo
+                if [[ $REPLY =~ ^[Nn]$ ]]; then
+                    error "Senha não validada. Instalação cancelada."
+                fi
+                continue
+            fi
+        else
+            # Para primário, apenas validar a força da senha
+            if [[ "$ADMIN_PASSWORD" =~ [A-Z] ]] && [[ "$ADMIN_PASSWORD" =~ [a-z] ]] && [[ "$ADMIN_PASSWORD" =~ [0-9] ]]; then
+                echo -e "${GREEN}✅ Senha forte (contém maiúscula, minúscula e número)${NC}"
+                break
+            else
+                echo -e "${YELLOW}⚠️  Senha fraca! Recomenda-se usar maiúscula, minúscula e número.${NC}"
+                read -p "Deseja continuar mesmo assim? (s/N): " -n 1 -r
+                echo
+                if [[ $REPLY =~ ^[Ss]$ ]]; then
+                    break
+                fi
+                echo ""
+                continue
+            fi
         fi
     done
+    
+    # ============================================
+    # ARMAZENAR SENHA PARA TODO O PROCESSO
+    # ============================================
+    
+    # Exportar senha para uso em todo o script
+    export ADMIN_PASSWORD
+    export ADMIN_USER
+    export DOMAIN
+    
+    # Criar arquivo de credenciais para uso posterior
+    cat > /tmp/ad_creds << EOF
+username=${ADMIN_USER}
+password=${ADMIN_PASSWORD}
+domain=${DOMAIN}
+EOF
+    chmod 600 /tmp/ad_creds
     
     echo ""
     header "RESUMO DA CONFIGURAÇÃO"
@@ -1859,6 +2005,7 @@ collect_configurations() {
     echo -e "  ${CYAN}Interface:${NC}      ${INTERFACE}"
     echo -e "  ${CYAN}DNS Forwarder:${NC}  ${DNS_FORWARDER}"
     echo -e "  ${CYAN}Admin User:${NC}     ${ADMIN_USER}@${DOMAIN}"
+    echo -e "  ${CYAN}Senha:${NC}          ${ADMIN_PASSWORD}"
     
     if [ "$INSTALLATION_TYPE" == "secondary" ]; then
         echo -e "  ${CYAN}DC Primário:${NC}    ${PRIMARY_DC_HOSTNAME}.${DOMAIN,,} (${PRIMARY_DC_IP})"
@@ -1868,6 +2015,7 @@ collect_configurations() {
     read -p "Deseja continuar com a instalação? (S/n): " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Ss]$ ]] && [[ ! -z "$REPLY" ]]; then
+        rm -f /tmp/ad_creds
         error "Instalação cancelada pelo usuário"
     fi
 }
