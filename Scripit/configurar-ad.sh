@@ -2,7 +2,7 @@
 
 # ==============================================
 # SCRIPT DE CONFIGURAÇÃO DO ACTIVE DIRECTORY
-# COM SAMBA NO LINUX - MODO AUTO
+# COM SAMBA NO LINUX - VERSÃO COMPLETA
 # ==============================================
 
 # Cores para output
@@ -16,7 +16,7 @@ NC='\033[0m'
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}   CONFIGURAÇÃO DO ACTIVE DIRECTORY    ${NC}"
-echo -e "${BLUE}   COM SAMBA NO LINUX - MODO AUTO     ${NC}"
+echo -e "${BLUE}   COM SAMBA NO LINUX - VERSÃO FULL   ${NC}"
 echo -e "${BLUE}========================================${NC}"
 
 # Verifica se é root
@@ -29,7 +29,7 @@ fi
 # ==============================================
 # 1. IDENTIFICAR SISTEMA
 # ==============================================
-echo -e "\n${YELLOW}[1/7] IDENTIFICANDO SISTEMA...${NC}"
+echo -e "\n${YELLOW}[1/8] IDENTIFICANDO SISTEMA...${NC}"
 
 if [ -f /etc/os-release ]; then
     . /etc/os-release
@@ -64,7 +64,7 @@ fi
 # ==============================================
 # 2. COLETAR INFORMAÇÕES DO DOMÍNIO
 # ==============================================
-echo -e "\n${YELLOW}[2/7] INFORMAÇÕES DO DOMÍNIO...${NC}"
+echo -e "\n${YELLOW}[2/8] INFORMAÇÕES DO DOMÍNIO...${NC}"
 
 read -p "Nome do DOMÍNIO DNS (ex: meudominio.local): " DNS_DOMAIN
 read -p "Nome NETBIOS do domínio (ex: MEUDOMINIO): " NETBIOS_DOMAIN
@@ -105,7 +105,7 @@ fi
 # ==============================================
 # 3. CONFIGURAR HOSTNAME E HOSTS
 # ==============================================
-echo -e "\n${YELLOW}[3/7] CONFIGURANDO HOSTNAME E /ETC/HOSTS...${NC}"
+echo -e "\n${YELLOW}[3/8] CONFIGURANDO HOSTNAME E /ETC/HOSTS...${NC}"
 
 # Define hostname
 hostnamectl set-hostname "$HOSTNAME.$DNS_DOMAIN"
@@ -121,15 +121,15 @@ echo -e "${GREEN}/etc/hosts configurado${NC}"
 # ==============================================
 # 4. INSTALAR PACOTES
 # ==============================================
-echo -e "\n${YELLOW}[4/7] INSTALANDO PACOTES...${NC}"
+echo -e "\n${YELLOW}[4/8] INSTALANDO PACOTES...${NC}"
+
+$PKG_UPDATE
 
 if [ "$PKG_MANAGER" = "apt" ]; then
-    $PKG_UPDATE
     $PKG_INSTALL samba krb5-user winbind libnss-winbind libpam-winbind \
         samba-dsdb-modules acl attr samba-vfs-modules smbclient \
-        dnsutils chrony net-tools bc expect
+        dnsutils chrony net-tools bc expect ufw
 else
-    $PKG_UPDATE
     $PKG_INSTALL samba krb5-workstation winbind libnss-winbind \
         pam_krb5 acl attr samba-client dnsutils chrony net-tools bc expect
 fi
@@ -137,37 +137,82 @@ fi
 echo -e "${GREEN}Pacotes instalados com sucesso!${NC}"
 
 # ==============================================
-# 5. CONFIGURAR DNS (resolv.conf)
+# 5. CONFIGURAR DNS (destravado!)
 # ==============================================
-echo -e "\n${YELLOW}[5/7] CONFIGURANDO DNS...${NC}"
+echo -e "\n${YELLOW}[5/8] CONFIGURANDO DNS...${NC}"
 
-# Para sistemas com systemd-resolved
-if systemctl is-active --quiet systemd-resolved; then
-    systemctl stop systemd-resolved
-    systemctl disable systemd-resolved
-fi
-
-# Remove link simbólico se existir
-if [ -L /etc/resolv.conf ]; then
-    rm -f /etc/resolv.conf
-fi
-
-# Cria novo resolv.conf
-cat > /etc/resolv.conf << EOF
+configurar_resolv_conf() {
+    local RESOLV_FILE="/etc/resolv.conf"
+    local RESOLV_BACKUP="/etc/resolv.conf.bak.$(date +%Y%m%d_%H%M%S)"
+    
+    echo -e "${CYAN}Verificando /etc/resolv.conf...${NC}"
+    
+    # Verifica se o arquivo é um link simbólico
+    if [ -L "$RESOLV_FILE" ]; then
+        echo -e "${YELLOW}⚠️  /etc/resolv.conf é um link simbólico. Removendo...${NC}"
+        rm -f "$RESOLV_FILE"
+    fi
+    
+    # Verifica se o arquivo existe e faz backup
+    if [ -f "$RESOLV_FILE" ]; then
+        echo -e "${YELLOW}Fazendo backup de $RESOLV_FILE...${NC}"
+        cp "$RESOLV_FILE" "$RESOLV_BACKUP"
+        echo -e "${GREEN}Backup criado: $RESOLV_BACKUP${NC}"
+    fi
+    
+    # Verifica e remove atributo imutável (se existir)
+    if lsattr "$RESOLV_FILE" 2>/dev/null | grep -q 'i'; then
+        echo -e "${YELLOW}⚠️  /etc/resolv.conf está com atributo imutável (+i). Removendo...${NC}"
+        chattr -i "$RESOLV_FILE" 2>/dev/null
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}✅ Atributo imutável removido${NC}"
+        else
+            echo -e "${RED}❌ Não foi possível remover o atributo imutável. Tentando força...${NC}"
+            sudo chattr -i "$RESOLV_FILE" 2>/dev/null
+        fi
+    fi
+    
+    # Para sistemas com systemd-resolved
+    if systemctl is-active --quiet systemd-resolved; then
+        echo -e "${YELLOW}Parando systemd-resolved...${NC}"
+        systemctl stop systemd-resolved
+        systemctl disable systemd-resolved
+        echo -e "${GREEN}systemd-resolved desativado${NC}"
+    fi
+    
+    # Cria novo resolv.conf
+    echo -e "${CYAN}Criando novo /etc/resolv.conf...${NC}"
+    cat > "$RESOLV_FILE" << EOF
+# Configuração gerada pelo script de AD - $(date)
+# NÃO ALTERE MANUALMENTE!
 search $DNS_DOMAIN
 nameserver $SERVER_IP
 nameserver $DNS_FORWARDER
 EOF
+    
+    # Verifica se o arquivo foi criado
+    if [ -f "$RESOLV_FILE" ]; then
+        echo -e "${GREEN}✅ /etc/resolv.conf criado com sucesso!${NC}"
+        echo -e "${CYAN}Conteúdo:${NC}"
+        cat "$RESOLV_FILE"
+    else
+        echo -e "${RED}❌ Falha ao criar /etc/resolv.conf${NC}"
+        return 1
+    fi
+    
+    # 🔓 NÃO TRAVA MAIS O ARQUIVO!
+    echo -e "${GREEN}✅ /etc/resolv.conf configurado (destravado)${NC}"
+    
+    return 0
+}
 
-# Trava o arquivo para evitar alterações
-chattr +i /etc/resolv.conf 2>/dev/null || echo -e "${YELLOW}Não foi possível travar o resolv.conf${NC}"
-
-echo -e "${GREEN}/etc/resolv.conf configurado${NC}"
+# Executa a configuração do DNS
+configurar_resolv_conf
 
 # ==============================================
 # 6. PROVISIONAR O DOMÍNIO (MODO AUTOMÁTICO!)
 # ==============================================
-echo -e "\n${YELLOW}[6/7] PROVISIONANDO O DOMÍNIO (MODO AUTOMÁTICO)...${NC}"
+echo -e "\n${YELLOW}[6/8] PROVISIONANDO O DOMÍNIO...${NC}"
 
 # Para serviços existentes
 systemctl stop smbd nmbd winbind 2>/dev/null
@@ -182,15 +227,23 @@ fi
 # Remove arquivo de configuração antigo
 rm -f /etc/samba/smb.conf
 
-# Cria um arquivo de resposta para o provisionamento
-cat > /tmp/provision_answers.txt << EOF
-$REALM
-$NETBIOS
-dc
-SAMBA_INTERNAL
-$DNS_FORWARDER
-EOF
+# Verifica se o domínio já foi provisionado
+if [ -f /var/lib/samba/private/sam.ldb ]; then
+    echo -e "${YELLOW}⚠️  Domínio já foi provisionado anteriormente!${NC}"
+    echo -e "${YELLOW}Deseja provisionar novamente? (s/N)${NC}"
+    read -p "> " RE_PROVISION
+    if [[ ! "$RE_PROVISION" =~ ^[Ss]$ ]]; then
+        echo -e "${YELLOW}Usando configuração existente...${NC}"
+    else
+        echo -e "${YELLOW}Removendo domínio existente...${NC}"
+        systemctl stop samba-ad-dc 2>/dev/null
+        rm -rf /var/lib/samba/private/*
+        rm -rf /var/lib/samba/sysvol/*
+        echo -e "${GREEN}Domínio removido.${NC}"
+    fi
+fi
 
+# Provisiona o domínio automaticamente usando expect
 echo -e "${CYAN}Provisionando com as seguintes configurações:${NC}"
 echo -e "  • Realm: $REALM"
 echo -e "  • Domain: $NETBIOS"
@@ -199,7 +252,6 @@ echo -e "  • DNS backend: SAMBA_INTERNAL"
 echo -e "  • DNS forwarder: $DNS_FORWARDER"
 echo -e "  • Senha Admin: ******"
 
-# Provisiona o domínio automaticamente usando expect
 expect << EOF
 set timeout 300
 spawn samba-tool domain provision --use-rfc2307 --interactive
@@ -227,8 +279,7 @@ if [ $? -ne 0 ]; then
         --server-role=dc \
         --dns-backend=SAMBA_INTERNAL \
         --use-rfc2307 \
-        --adminpass="$ADMIN_PASS" \
-        --dns-forwarder="$DNS_FORWARDER"
+        --adminpass="$ADMIN_PASS"
     
     if [ $? -ne 0 ]; then
         echo -e "${RED}❌ Falha no provisionamento!${NC}"
@@ -240,9 +291,17 @@ echo -e "${GREEN}✅ Domínio provisionado com sucesso!${NC}"
 
 # Salva a senha em um arquivo seguro
 cat > /root/.ad_password << EOF
+========================================
+INFORMAÇÕES DO ACTIVE DIRECTORY
+========================================
 Domínio: $DNS_DOMAIN
+Realm: $REALM
+NetBIOS: $NETBIOS
+Hostname: $HOSTNAME.$DNS_DOMAIN
+IP do Servidor: $SERVER_IP
 Administrator Password: $ADMIN_PASS
 Data: $(date)
+========================================
 EOF
 chmod 600 /root/.ad_password
 echo -e "${GREEN}Senha salva em /root/.ad_password${NC}"
@@ -250,7 +309,7 @@ echo -e "${GREEN}Senha salva em /root/.ad_password${NC}"
 # ==============================================
 # 7. CONFIGURAR SERVIÇOS
 # ==============================================
-echo -e "\n${YELLOW}[7/7] CONFIGURANDO SERVIÇOS...${NC}"
+echo -e "\n${YELLOW}[7/8] CONFIGURANDO SERVIÇOS...${NC}"
 
 # 7.1 Configurar Kerberos
 echo -e "${CYAN}Configurando Kerberos...${NC}"
@@ -302,10 +361,45 @@ else
     journalctl -xe -u samba-ad-dc --no-pager | tail -20
 fi
 
+# 7.4 Configurar Firewall (UFW)
+echo -e "${CYAN}Configurando firewall...${NC}"
+
+if command -v ufw &> /dev/null; then
+    echo -e "${YELLOW}Configurando UFW para liberar portas do AD...${NC}"
+    
+    # Libera portas do Active Directory
+    ufw allow 53/tcp comment 'DNS TCP'
+    ufw allow 53/udp comment 'DNS UDP'
+    ufw allow 88/tcp comment 'Kerberos TCP'
+    ufw allow 88/udp comment 'Kerberos UDP'
+    ufw allow 135/tcp comment 'RPC'
+    ufw allow 137-138/udp comment 'NetBIOS'
+    ufw allow 139/tcp comment 'NetBIOS'
+    ufw allow 389/tcp comment 'LDAP'
+    ufw allow 389/udp comment 'LDAP UDP'
+    ufw allow 445/tcp comment 'SMB'
+    ufw allow 464/tcp comment 'Kerberos Change Password'
+    ufw allow 464/udp comment 'Kerberos Change Password'
+    ufw allow 636/tcp comment 'LDAPS'
+    ufw allow 3268-3269/tcp comment 'Global Catalog'
+    
+    # Libera SSH (importante!)
+    ufw allow 22/tcp comment 'SSH'
+    
+    # Habilita firewall
+    echo -e "${YELLOW}Habilitando UFW...${NC}"
+    echo "y" | ufw enable
+    
+    ufw status verbose
+    echo -e "${GREEN}Firewall configurado!${NC}"
+else
+    echo -e "${YELLOW}⚠️  UFW não encontrado. Configure o firewall manualmente.${NC}"
+fi
+
 # ==============================================
-# 8. VERIFICAÇÕES
+# 8. VERIFICAÇÕES E FINALIZAÇÃO
 # ==============================================
-echo -e "\n${YELLOW}VERIFICANDO CONFIGURAÇÃO...${NC}"
+echo -e "\n${YELLOW}[8/8] VERIFICANDO CONFIGURAÇÃO...${NC}"
 
 # Espera o serviço iniciar completamente
 sleep 5
@@ -325,9 +419,9 @@ else
 fi
 
 # ==============================================
-# 9. CRIAR USUÁRIO ADMIN UNICODE (opcional)
+# 9. PERGUNTAS OPCIONAIS
 # ==============================================
-echo -e "\n${YELLOW}Criar usuário admin com suporte a RFC2307? (s/N)${NC}"
+echo -e "\n${YELLOW}Deseja criar um usuário admin com suporte a RFC2307? (s/N)${NC}"
 read -p "> " CREATE_ADMIN
 
 if [[ "$CREATE_ADMIN" =~ ^[Ss]$ ]]; then
@@ -348,9 +442,6 @@ if [[ "$CREATE_ADMIN" =~ ^[Ss]$ ]]; then
     fi
 fi
 
-# ==============================================
-# 10. CRIAR GRUPOS E OU PADRÃO 
-# ==============================================
 echo -e "\n${YELLOW}Criar estrutura básica de grupos e OUs? (s/N)${NC}"
 read -p "> " CREATE_STRUCTURE
 
@@ -378,7 +469,7 @@ if [[ "$CREATE_STRUCTURE" =~ ^[Ss]$ ]]; then
 fi
 
 # ==============================================
-# 11. FINALIZAÇÃO
+# 10. FINALIZAÇÃO
 # ==============================================
 echo -e "\n${BLUE}========================================${NC}"
 echo -e "${GREEN}✅ CONFIGURAÇÃO DO AD CONCLUÍDA!${NC}"
@@ -399,6 +490,7 @@ echo -e "  • Listar grupos: wbinfo -g"
 echo -e "  • Testar autenticação: kinit Administrator@$REALM"
 echo -e "  • Testar autenticação: smbclient -L localhost -U Administrator"
 echo -e "  • Verificar DNS: host -t SRV _ldap._tcp.$DNS_DOMAIN"
+echo -e "  • Verificar firewall: ufw status verbose"
 
 echo -e "\n${RED}⚠️  ATENÇÃO:${NC}"
 echo -e "  • O servidor DEVE ter IP fixo: $SERVER_IP"
