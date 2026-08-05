@@ -15,7 +15,9 @@ echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}   CONFIGURAÇÃO PÓS-FORMATAÇÃO LINUX  ${NC}"
 echo -e "${BLUE}========================================${NC}"
 
+# ==============================================
 # 1. IDENTIFICAR VERSÃO DO LINUX
+# ==============================================
 echo -e "\n${YELLOW}[1/7] IDENTIFICANDO VERSÃO DO LINUX...${NC}"
 if [ -f /etc/os-release ]; then
     . /etc/os-release
@@ -26,7 +28,9 @@ else
     echo -e "${RED}Sistema não suportado ou arquivo /etc/os-release não encontrado${NC}"
 fi
 
+# ==============================================
 # 2. ATUALIZAR O SISTEMA
+# ==============================================
 echo -e "\n${YELLOW}[2/7] ATUALIZANDO REPOSITÓRIOS E PACOTES...${NC}"
 
 # Detecta o gerenciador de pacotes
@@ -55,7 +59,9 @@ else
     echo -e "${RED}Nenhum gerenciador de pacotes conhecido encontrado!${NC}"
 fi
 
+# ==============================================
 # 3. SINCRONIZAR DATA E HORA COM NTP BRASIL
+# ==============================================
 echo -e "\n${YELLOW}[3/7] SINCRONIZANDO DATA E HORA COM NTP.BR...${NC}"
 
 # Servidores NTP do Brasil (ntp.br)
@@ -198,7 +204,9 @@ configurar_ntp
 echo -e "\n${GREEN}Data e hora atual: $(date)${NC}"
 echo -e "${GREEN}Timezone: $(timedatectl 2>/dev/null | grep "Time zone" || echo "N/A")${NC}"
 
-# 4. IDENTIFICAR IP ATUAL
+# ==============================================
+# 4. IDENTIFICAR IP ATUAL (apenas para referência)
+# ==============================================
 echo -e "\n${YELLOW}[4/7] IDENTIFICANDO IP ATUAL...${NC}"
 
 # IP da interface principal (excluindo loopback)
@@ -209,14 +217,81 @@ if [ -z "$CURRENT_IP" ]; then
 fi
 
 if [ -n "$CURRENT_IP" ]; then
-    echo -e "${GREEN}IP atual: $CURRENT_IP${NC}"
+    echo -e "${GREEN}IP atual (DHCP): $CURRENT_IP${NC}"
 else
     echo -e "${RED}Não foi possível identificar o IP atual${NC}"
-    exit 1
 fi
 
-# 5. CONFIGURAR IP FIXO
-echo -e "\n${YELLOW}[5/7] CONFIGURANDO IP FIXO...${NC}"
+# ==============================================
+# 5. ATIVAR ROOT NO SSH (antes do IP fixo)
+# ==============================================
+echo -e "\n${YELLOW}[5/7] ATIVANDO ACESSO ROOT NO SSH...${NC}"
+
+SSH_CONFIG="/etc/ssh/sshd_config"
+
+# Verifica se o arquivo existe
+if [ ! -f "$SSH_CONFIG" ]; then
+    echo -e "${RED}Arquivo $SSH_CONFIG não encontrado! Instale o SSH primeiro.${NC}"
+    echo -e "${YELLOW}Instalando SSH...${NC}"
+    
+    if command -v apt &> /dev/null; then
+        apt install openssh-server -y
+    elif command -v dnf &> /dev/null; then
+        dnf install openssh-server -y
+    elif command -v yum &> /dev/null; then
+        yum install openssh-server -y
+    elif command -v pacman &> /dev/null; then
+        pacman -S openssh --noconfirm
+    fi
+fi
+
+if [ -f "$SSH_CONFIG" ]; then
+    # Faz backup do arquivo original
+    cp $SSH_CONFIG ${SSH_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)
+    echo -e "${GREEN}Backup criado: ${SSH_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)${NC}"
+    
+    # Ativa root login
+    sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' $SSH_CONFIG
+    sed -i 's/^PermitRootLogin no/PermitRootLogin yes/' $SSH_CONFIG
+    sed -i 's/^PermitRootLogin prohibit-password/PermitRootLogin yes/' $SSH_CONFIG
+    
+    # Se não encontrou a linha, adiciona no final
+    if ! grep -q "^PermitRootLogin" $SSH_CONFIG; then
+        echo "PermitRootLogin yes" >> $SSH_CONFIG
+    fi
+    
+    # Reinicia o serviço SSH
+    if command -v systemctl &> /dev/null; then
+        systemctl restart ssh
+        systemctl restart sshd
+        systemctl enable ssh
+        systemctl enable sshd
+    else
+        service ssh restart
+        service sshd restart
+    fi
+    
+    echo -e "${GREEN}Acesso root habilitado no SSH!${NC}"
+    echo -e "${YELLOW}⚠️  LEMBRE-SE: Defina a senha do root com: sudo passwd root${NC}"
+else
+    echo -e "${RED}Falha ao configurar SSH${NC}"
+fi
+
+# ==============================================
+# 6. LISTAR ARQUIVOS MODIFICADOS (antes do IP fixo)
+# ==============================================
+echo -e "\n${YELLOW}[6/7] RESUMO DOS ARQUIVOS MODIFICADOS...${NC}"
+
+echo -e "${BLUE}Arquivos modificados/backups criados:${NC}"
+if [ -f /etc/ssh/sshd_config ]; then
+    echo -e "  • SSH Config: /etc/ssh/sshd_config"
+    echo -e "  • Backups: $(ls -la /etc/ssh/sshd_config.backup.* 2>/dev/null | awk '{print $9}')"
+fi
+
+# ==============================================
+# 7. CONFIGURAR IP FIXO (POR ÚLTIMO!)
+# ==============================================
+echo -e "\n${YELLOW}[7/7] CONFIGURANDO IP FIXO...${NC}"
 
 # Detecta a interface de rede principal
 INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n 1)
@@ -226,6 +301,7 @@ if [ -z "$INTERFACE" ]; then
 fi
 
 echo -e "${GREEN}Interface detectada: $INTERFACE${NC}"
+echo -e "${YELLOW}IP atual (DHCP): $CURRENT_IP${NC}"
 
 # Pergunta ao usuário os dados da rede
 read -p "Digite o IP FIXO desejado (ex: 192.168.1.100): " FIXED_IP
@@ -505,77 +581,6 @@ else
     echo -e "${YELLOW}Por favor, configure o IP manualmente${NC}"
 fi
 
-echo -e "${GREEN}Configuração de IP fixo concluída!${NC}"
-
-# 6. ATIVAR ROOT NO SSH
-echo -e "\n${YELLOW}[6/7] ATIVANDO ACESSO ROOT NO SSH...${NC}"
-
-SSH_CONFIG="/etc/ssh/sshd_config"
-
-# Verifica se o arquivo existe
-if [ ! -f "$SSH_CONFIG" ]; then
-    echo -e "${RED}Arquivo $SSH_CONFIG não encontrado! Instale o SSH primeiro.${NC}"
-    echo -e "${YELLOW}Instalando SSH...${NC}"
-    
-    if command -v apt &> /dev/null; then
-        apt install openssh-server -y
-    elif command -v dnf &> /dev/null; then
-        dnf install openssh-server -y
-    elif command -v yum &> /dev/null; then
-        yum install openssh-server -y
-    elif command -v pacman &> /dev/null; then
-        pacman -S openssh --noconfirm
-    fi
-fi
-
-if [ -f "$SSH_CONFIG" ]; then
-    # Faz backup do arquivo original
-    cp $SSH_CONFIG ${SSH_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)
-    echo -e "${GREEN}Backup criado: ${SSH_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)${NC}"
-    
-    # Ativa root login
-    sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' $SSH_CONFIG
-    sed -i 's/^PermitRootLogin no/PermitRootLogin yes/' $SSH_CONFIG
-    sed -i 's/^PermitRootLogin prohibit-password/PermitRootLogin yes/' $SSH_CONFIG
-    
-    # Se não encontrou a linha, adiciona no final
-    if ! grep -q "^PermitRootLogin" $SSH_CONFIG; then
-        echo "PermitRootLogin yes" >> $SSH_CONFIG
-    fi
-    
-    # Reinicia o serviço SSH
-    if command -v systemctl &> /dev/null; then
-        systemctl restart ssh
-        systemctl restart sshd
-        systemctl enable ssh
-        systemctl enable sshd
-    else
-        service ssh restart
-        service sshd restart
-    fi
-    
-    echo -e "${GREEN}Acesso root habilitado no SSH!${NC}"
-else
-    echo -e "${RED}Falha ao configurar SSH${NC}"
-fi
-
-# 7. LISTAR ARQUIVOS MODIFICADOS
-echo -e "\n${YELLOW}[7/7] RESUMO DOS ARQUIVOS MODIFICADOS...${NC}"
-
-echo -e "${BLUE}Arquivos modificados/backups criados:${NC}"
-if [ -d /etc/netplan ]; then
-    echo -e "  • Netplan: $(ls -la /etc/netplan/*.yaml 2>/dev/null | awk '{print $9}')"
-    echo -e "  • Backups: $(ls -la /etc/netplan/*.backup.* 2>/dev/null | awk '{print $9}')"
-elif [ -f /etc/network/interfaces ]; then
-    echo -e "  • Interfaces: /etc/network/interfaces"
-    echo -e "  • Backups: $(ls -la /etc/network/interfaces.backup.* 2>/dev/null | awk '{print $9}')"
-fi
-
-if [ -f /etc/ssh/sshd_config ]; then
-    echo -e "  • SSH Config: /etc/ssh/sshd_config"
-    echo -e "  • Backups: $(ls -la /etc/ssh/sshd_config.backup.* 2>/dev/null | awk '{print $9}')"
-fi
-
 # ==============================================
 # FINALIZAÇÃO
 # ==============================================
@@ -587,14 +592,21 @@ echo -e "  • Sistema: $(cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2
 echo -e "  • Data/Hora: $(date)"
 echo -e "  • Timezone: $(timedatectl 2>/dev/null | grep "Time zone" | awk '{print $3}')"
 echo -e "  • Servidores NTP: ntp.br"
-echo -e "  • IP Antigo: $CURRENT_IP"
+echo -e "  • IP Antigo (DHCP): $CURRENT_IP"
 echo -e "  • IP Novo Fixo: $FIXED_IP"
 echo -e "  • Gateway: $GATEWAY"
 echo -e "  • Interface: $INTERFACE"
 echo -e "  • Root SSH: Habilitado (PermitRootLogin yes)"
-echo -e "\n${YELLOW}⚠️  ATENÇÃO:${NC}"
-echo -e "  • A senha do root deve ser definida com: sudo passwd root"
-echo -e "  • O IP pode mudar após reiniciar a rede"
-echo -e "  • Para testar: ssh root@$FIXED_IP"
+
+echo -e "\n${RED}========================================================${NC}"
+echo -e "${RED}⚠️  ATENÇÃO: A CONEXÃO SSH SERÁ PERDIDA AGORA! ⚠️${NC}"
+echo -e "${RED}========================================================${NC}"
+echo -e "${YELLOW}O IP foi alterado de $CURRENT_IP para $FIXED_IP${NC}"
+echo -e "${YELLOW}Reconecte-se usando:${NC}"
+echo -e "${BLUE}  ssh root@$FIXED_IP${NC}"
+echo -e "${BLUE}  ssh linux@$FIXED_IP${NC}"
+echo -e "\n${YELLOW}Lembre-se de definir a senha do root:${NC}"
+echo -e "${BLUE}  sudo passwd root${NC}"
+
 echo -e "\n${BLUE}Recomendação: Reinicie o sistema para aplicar todas as mudanças.${NC}"
-echo -e "sudo reboot\n"
+echo -e "${BLUE}  sudo reboot${NC}\n"
