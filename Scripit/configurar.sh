@@ -9,7 +9,9 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m' # Sem cor
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}   CONFIGURAÇÃO PÓS-FORMATAÇÃO LINUX  ${NC}"
@@ -18,7 +20,7 @@ echo -e "${BLUE}========================================${NC}"
 # ==============================================
 # 0. DEFINIR SENHA DO ROOT (ANTES DE TUDO!)
 # ==============================================
-echo -e "\n${YELLOW}[0/8] DEFININDO SENHA DO ROOT...${NC}"
+echo -e "\n${YELLOW}[0/9] DEFININDO SENHA DO ROOT...${NC}"
 echo -e "${RED}⚠️  ATENÇÃO: Defina a senha do root agora para não perder o acesso!${NC}"
 
 # Verifica se o script está sendo executado como root
@@ -52,7 +54,7 @@ fi
 # ==============================================
 # 1. IDENTIFICAR VERSÃO DO LINUX
 # ==============================================
-echo -e "\n${YELLOW}[1/8] IDENTIFICANDO VERSÃO DO LINUX...${NC}"
+echo -e "\n${YELLOW}[1/9] IDENTIFICANDO VERSÃO DO LINUX...${NC}"
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     echo -e "${GREEN}Distribuição: $NAME${NC}"
@@ -63,9 +65,93 @@ else
 fi
 
 # ==============================================
-# 2. ATUALIZAR O SISTEMA
+# 2. TRADUZIR SISTEMA PARA PORTUGUÊS
 # ==============================================
-echo -e "\n${YELLOW}[2/8] ATUALIZANDO REPOSITÓRIOS E PACOTES...${NC}"
+echo -e "\n${YELLOW}[2/9] TRADUZINDO SISTEMA PARA PORTUGUÊS DO BRASIL...${NC}"
+
+# Função para configurar idioma
+configurar_idioma() {
+    echo -e "${CYAN}Configurando locale para pt_BR.UTF-8...${NC}"
+    
+    # Detecta o gerenciador de pacotes
+    if command -v apt &> /dev/null; then
+        # Debian/Ubuntu
+        echo -e "${GREEN}Configurando idioma no Debian/Ubuntu...${NC}"
+        
+        # Instala pacotes de idioma
+        apt install -y language-pack-pt language-pack-pt-base language-pack-gnome-pt
+        
+        # Configura locale
+        locale-gen pt_BR.UTF-8
+        update-locale LANG=pt_BR.UTF-8 LC_ALL=pt_BR.UTF-8 LANGUAGE=pt_BR:pt
+        
+        # Define o locale
+        echo "LANG=pt_BR.UTF-8" > /etc/default/locale
+        echo "LC_ALL=pt_BR.UTF-8" >> /etc/default/locale
+        echo "LANGUAGE=pt_BR:pt" >> /etc/default/locale
+        
+        # Configura o console
+        echo "LANG=pt_BR.UTF-8" > /etc/environment
+        
+    elif command -v dnf &> /dev/null || command -v yum &> /dev/null; then
+        # RHEL/CentOS/Fedora
+        echo -e "${GREEN}Configurando idioma no RHEL/Fedora...${NC}"
+        
+        # Instala pacotes de idioma
+        if command -v dnf &> /dev/null; then
+            dnf install -y glibc-langpack-pt
+        else
+            yum install -y glibc-langpack-pt
+        fi
+        
+        # Configura locale
+        localectl set-locale LANG=pt_BR.UTF-8
+        localectl set-keymap br-abnt2
+        
+    elif command -v pacman &> /dev/null; then
+        # Arch Linux
+        echo -e "${GREEN}Configurando idioma no Arch Linux...${NC}"
+        
+        # Descomenta pt_BR.UTF-8 no locale.gen
+        sed -i 's/^#pt_BR.UTF-8/pt_BR.UTF-8/' /etc/locale.gen
+        locale-gen
+        
+        # Configura
+        echo "LANG=pt_BR.UTF-8" > /etc/locale.conf
+        echo "LC_ALL=pt_BR.UTF-8" >> /etc/locale.conf
+    fi
+    
+    # Configura timezone (já feito na parte NTP)
+    timedatectl set-timezone America/Sao_Paulo
+    
+    # Configura o teclado para ABNT2
+    echo -e "${CYAN}Configurando teclado para ABNT2 (Brasil)...${NC}"
+    if command -v localectl &> /dev/null; then
+        localectl set-keymap br-abnt2
+        localectl set-x11-keymap br abnt2
+    fi
+    
+    # Cria arquivo de configuração do console
+    if [ -f /etc/default/keyboard ]; then
+        cat > /etc/default/keyboard << EOF
+XKBMODEL=pc105
+XKBLAYOUT=br
+XKBVARIANT=abnt2
+XKBOPTIONS=
+BACKSPACE=guess
+EOF
+    fi
+    
+    echo -e "${GREEN}✅ Sistema configurado para português do Brasil!${NC}"
+}
+
+# Executa a configuração de idioma
+configurar_idioma
+
+# ==============================================
+# 3. ATUALIZAR O SISTEMA
+# ==============================================
+echo -e "\n${YELLOW}[3/9] ATUALIZANDO REPOSITÓRIOS E PACOTES...${NC}"
 
 if command -v apt &> /dev/null; then
     echo -e "${GREEN}Gerenciador APT detectado (Debian/Ubuntu)${NC}"
@@ -74,25 +160,25 @@ if command -v apt &> /dev/null; then
     apt dist-upgrade -y
     apt autoremove -y
     # Instala bc para conversão de máscara
-    apt install bc -y
+    apt install -y bc
 elif command -v dnf &> /dev/null; then
     echo -e "${GREEN}Gerenciador DNF detectado (Fedora/RHEL)${NC}"
     dnf update -y
     dnf upgrade -y
-    dnf install bc -y
+    dnf install -y bc
 elif command -v yum &> /dev/null; then
     echo -e "${GREEN}Gerenciador YUM detectado (CentOS/RHEL)${NC}"
     yum update -y
     yum upgrade -y
-    yum install bc -y
+    yum install -y bc
 else
     echo -e "${RED}Nenhum gerenciador de pacotes conhecido encontrado!${NC}"
 fi
 
 # ==============================================
-# 3. SINCRONIZAR DATA E HORA COM NTP BRASIL
+# 4. SINCRONIZAR DATA E HORA COM NTP BRASIL
 # ==============================================
-echo -e "\n${YELLOW}[3/8] SINCRONIZANDO DATA E HORA COM NTP.BR...${NC}"
+echo -e "\n${YELLOW}[4/9] SINCRONIZANDO DATA E HORA COM NTP.BR...${NC}"
 
 if command -v timedatectl &> /dev/null; then
     echo -e "${GREEN}Usando timedatectl (systemd)${NC}"
@@ -130,9 +216,9 @@ if command -v timedatectl &> /dev/null; then
 fi
 
 # ==============================================
-# 4. IDENTIFICAR IP ATUAL
+# 5. IDENTIFICAR IP ATUAL
 # ==============================================
-echo -e "\n${YELLOW}[4/8] IDENTIFICANDO IP ATUAL...${NC}"
+echo -e "\n${YELLOW}[5/9] IDENTIFICANDO IP ATUAL...${NC}"
 
 CURRENT_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n 1)
 if [ -z "$CURRENT_IP" ]; then
@@ -146,9 +232,9 @@ else
 fi
 
 # ==============================================
-# 5. ATIVAR ROOT NO SSH
+# 6. ATIVAR ROOT NO SSH
 # ==============================================
-echo -e "\n${YELLOW}[5/8] ATIVANDO ACESSO ROOT NO SSH...${NC}"
+echo -e "\n${YELLOW}[6/9] ATIVANDO ACESSO ROOT NO SSH...${NC}"
 
 SSH_CONFIG="/etc/ssh/sshd_config"
 
@@ -177,7 +263,7 @@ if [ -f "$SSH_CONFIG" ]; then
 fi
 
 # ==============================================
-# 6. FUNÇÃO PARA CONVERTER MÁSCARA PARA CIDR
+# 7. FUNÇÃO PARA CONVERTER MÁSCARA PARA CIDR
 # ==============================================
 converter_mascara_para_cidr() {
     local MASCARA=$1
@@ -226,9 +312,9 @@ converter_mascara_para_cidr() {
 }
 
 # ==============================================
-# 7. CONFIGURAR IP FIXO (POR ÚLTIMO!)
+# 8. CONFIGURAR IP FIXO (POR ÚLTIMO!)
 # ==============================================
-echo -e "\n${YELLOW}[6/8] CONFIGURANDO IP FIXO...${NC}"
+echo -e "\n${YELLOW}[7/9] CONFIGURANDO IP FIXO...${NC}"
 
 INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n 1)
 if [ -z "$INTERFACE" ]; then
@@ -238,7 +324,8 @@ fi
 echo -e "${GREEN}Interface detectada: $INTERFACE${NC}"
 echo -e "${YELLOW}IP atual (DHCP): $CURRENT_IP${NC}"
 
-# Pergunta ao usuário os dados da rede
+# Pergunta ao usuário os dados da rede (em português)
+echo -e "${CYAN}Digite as configurações de rede:${NC}"
 read -p "Digite o IP FIXO desejado (ex: 192.168.1.100): " FIXED_IP
 read -p "Digite a MÁSCARA DE REDE (ex: 255.255.255.0 ou /24 ou apenas 24): " NETMASK
 read -p "Digite o GATEWAY (ex: 192.168.1.1): " GATEWAY
@@ -342,9 +429,9 @@ elif [ -f /etc/network/interfaces ]; then
 fi
 
 # ==============================================
-# 8. VERIFICAR SENHA DO ROOT (CONFIRMAÇÃO FINAL)
+# 9. VERIFICAR SENHA DO ROOT (CONFIRMAÇÃO FINAL)
 # ==============================================
-echo -e "\n${YELLOW}[7/8] VERIFICANDO SENHA DO ROOT...${NC}"
+echo -e "\n${YELLOW}[8/9] VERIFICANDO SENHA DO ROOT...${NC}"
 
 # Verifica se o root tem senha definida
 ROOT_HAS_PASSWORD=$(grep "^root:" /etc/shadow | cut -d: -f2)
@@ -364,9 +451,9 @@ else
 fi
 
 # ==============================================
-# 9. LISTAR ARQUIVOS MODIFICADOS
+# 10. LISTAR ARQUIVOS MODIFICADOS
 # ==============================================
-echo -e "\n${YELLOW}[8/8] RESUMO DOS ARQUIVOS MODIFICADOS...${NC}"
+echo -e "\n${YELLOW}[9/9] RESUMO DOS ARQUIVOS MODIFICADOS...${NC}"
 
 echo -e "${BLUE}Arquivos modificados/backups criados:${NC}"
 if [ -d /etc/netplan ]; then
@@ -390,8 +477,10 @@ echo -e "${GREEN}✅ CONFIGURAÇÃO CONCLUÍDA COM SUCESSO!${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo -e "${YELLOW}Resumo:${NC}"
 echo -e "  • Sistema: $(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d'"' -f2 || echo "N/A")"
+echo -e "  • Idioma: Português do Brasil (pt_BR.UTF-8)"
+echo -e "  • Teclado: ABNT2 (Brasil)"
 echo -e "  • Data/Hora: $(date)"
-echo -e "  • Timezone: $(timedatectl 2>/dev/null | grep "Time zone" | awk '{print $3}')"
+echo -e "  • Timezone: America/Sao_Paulo"
 echo -e "  • IP Antigo (DHCP): $CURRENT_IP"
 echo -e "  • IP Novo Fixo: $FIXED_IP"
 echo -e "  • Gateway: $GATEWAY"
