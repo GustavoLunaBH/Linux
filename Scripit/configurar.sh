@@ -16,7 +16,7 @@ echo -e "${BLUE}   CONFIGURAÇÃO PÓS-FORMATAÇÃO LINUX  ${NC}"
 echo -e "${BLUE}========================================${NC}"
 
 # 1. IDENTIFICAR VERSÃO DO LINUX
-echo -e "\n${YELLOW}[1/6] IDENTIFICANDO VERSÃO DO LINUX...${NC}"
+echo -e "\n${YELLOW}[1/7] IDENTIFICANDO VERSÃO DO LINUX...${NC}"
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     echo -e "${GREEN}Distribuição: $NAME${NC}"
@@ -27,7 +27,7 @@ else
 fi
 
 # 2. ATUALIZAR O SISTEMA
-echo -e "\n${YELLOW}[2/6] ATUALIZANDO REPOSITÓRIOS E PACOTES...${NC}"
+echo -e "\n${YELLOW}[2/7] ATUALIZANDO REPOSITÓRIOS E PACOTES...${NC}"
 
 # Detecta o gerenciador de pacotes
 if command -v apt &> /dev/null; then
@@ -55,8 +55,151 @@ else
     echo -e "${RED}Nenhum gerenciador de pacotes conhecido encontrado!${NC}"
 fi
 
-# 3. IDENTIFICAR IP ATUAL
-echo -e "\n${YELLOW}[3/6] IDENTIFICANDO IP ATUAL...${NC}"
+# 3. SINCRONIZAR DATA E HORA COM NTP BRASIL
+echo -e "\n${YELLOW}[3/7] SINCRONIZANDO DATA E HORA COM NTP.BR...${NC}"
+
+# Servidores NTP do Brasil (ntp.br)
+NTP_SERVERS=(
+    "a.st1.ntp.br"
+    "b.st1.ntp.br"
+    "c.st1.ntp.br"
+    "d.st1.ntp.br"
+    "gps.ntp.br"
+    "pool.ntp.br"
+)
+
+# Função para configurar NTP no sistema
+configurar_ntp() {
+    echo -e "${YELLOW}Configurando servidores NTP do Brasil...${NC}"
+    
+    # Detecta o sistema e configura
+    if command -v timedatectl &> /dev/null; then
+        # systemd (maioria das distribuições modernas)
+        echo -e "${GREEN}Usando timedatectl (systemd)${NC}"
+        
+        # Instala ntp ou chrony se necessário
+        if ! command -v chronyc &> /dev/null && ! command -v ntpq &> /dev/null; then
+            echo -e "${YELLOW}Instalando chrony (recomendado)...${NC}"
+            if command -v apt &> /dev/null; then
+                apt install chrony -y
+            elif command -v dnf &> /dev/null; then
+                dnf install chrony -y
+            elif command -v yum &> /dev/null; then
+                yum install chrony -y
+            elif command -v pacman &> /dev/null; then
+                pacman -S chrony --noconfirm
+            fi
+        fi
+        
+        # Configura timezone para America/Sao_Paulo
+        timedatectl set-timezone America/Sao_Paulo
+        echo -e "${GREEN}Timezone definido: America/Sao_Paulo${NC}"
+        
+        # Configura servidores NTP
+        if command -v chronyc &> /dev/null; then
+            # Chrony - configuração moderna
+            CHRONY_CONF="/etc/chrony/chrony.conf"
+            if [ -f "$CHRONY_CONF" ]; then
+                cp "$CHRONY_CONF" "${CHRONY_CONF}.backup.$(date +%Y%m%d_%H%M%S)"
+                # Remove servidores antigos
+                sed -i '/^pool/d' "$CHRONY_CONF"
+                sed -i '/^server/d' "$CHRONY_CONF"
+                # Adiciona servidores do Brasil
+                for server in "${NTP_SERVERS[@]}"; do
+                    echo "server $server iburst" >> "$CHRONY_CONF"
+                done
+                # Adiciona pool como fallback
+                echo "pool pool.ntp.br iburst" >> "$CHRONY_CONF"
+                
+                systemctl restart chrony
+                chronyc -a makestep
+                echo -e "${GREEN}Chrony configurado com servidores NTP do Brasil${NC}"
+            fi
+        elif command -v ntpq &> /dev/null; then
+            # NTP tradicional
+            NTP_CONF="/etc/ntp.conf"
+            if [ -f "$NTP_CONF" ]; then
+                cp "$NTP_CONF" "${NTP_CONF}.backup.$(date +%Y%m%d_%H%M%S)"
+                sed -i '/^server/d' "$NTP_CONF"
+                sed -i '/^pool/d' "$NTP_CONF"
+                for server in "${NTP_SERVERS[@]}"; do
+                    echo "server $server" >> "$NTP_CONF"
+                done
+                echo "pool pool.ntp.br" >> "$NTP_CONF"
+                
+                systemctl restart ntp
+                echo -e "${GREEN}NTP configurado com servidores do Brasil${NC}"
+            fi
+        fi
+        
+        # Força sincronização imediata
+        timedatectl set-ntp true
+        timedatectl status
+        
+        # Sincroniza agora
+        if command -v chronyc &> /dev/null; then
+            chronyc -a makestep
+        elif command -v ntpdate &> /dev/null; then
+            ntpdate -u a.st1.ntp.br
+        fi
+        
+    elif [ -f /etc/debian_version ] || [ -f /etc/ubuntu_version ]; then
+        # Debian/Ubuntu tradicional sem systemd
+        echo -e "${GREEN}Configurando NTP para Debian/Ubuntu tradicional${NC}"
+        
+        # Instala ntpdate se não tiver
+        if ! command -v ntpdate &> /dev/null; then
+            apt install ntpdate -y
+        fi
+        
+        # Sincroniza com servidores do Brasil
+        ntpdate -u a.st1.ntp.br
+        ntpdate -u b.st1.ntp.br
+        
+        # Configura /etc/default/ntpdate
+        echo -e "${YELLOW}Configurando ntpdate para usar servidores do Brasil...${NC}"
+        sed -i 's/^NTPSERVERS=.*/NTPSERVERS="a.st1.ntp.br b.st1.ntp.br c.st1.ntp.br"/' /etc/default/ntpdate
+        
+        # Configura cron para sincronizar diariamente
+        echo "0 3 * * * /usr/sbin/ntpdate -u a.st1.ntp.br" >> /etc/crontab
+        echo -e "${GREEN}Sincronização agendada diariamente às 3h${NC}"
+        
+    elif [ -f /etc/redhat-release ]; then
+        # RHEL/CentOS/Fedora
+        echo -e "${GREEN}Configurando NTP para RHEL/CentOS/Fedora${NC}"
+        
+        if command -v chrony &> /dev/null; then
+            CHRONY_CONF="/etc/chrony.conf"
+            if [ -f "$CHRONY_CONF" ]; then
+                cp "$CHRONY_CONF" "${CHRONY_CONF}.backup.$(date +%Y%m%d_%H%M%S)"
+                sed -i '/^server/d' "$CHRONY_CONF"
+                for server in "${NTP_SERVERS[@]}"; do
+                    echo "server $server iburst" >> "$CHRONY_CONF"
+                done
+                systemctl restart chronyd
+                chronyc -a makestep
+                echo -e "${GREEN}Chrony configurado com servidores NTP do Brasil${NC}"
+            fi
+        else
+            # Instala chrony se não tiver
+            yum install chrony -y
+            systemctl enable chronyd
+            systemctl start chronyd
+        fi
+    fi
+    
+    echo -e "${GREEN}Sincronização de data/hora concluída!${NC}"
+}
+
+# Executa a configuração NTP
+configurar_ntp
+
+# Mostra data/hora atual
+echo -e "\n${GREEN}Data e hora atual: $(date)${NC}"
+echo -e "${GREEN}Timezone: $(timedatectl 2>/dev/null | grep "Time zone" || echo "N/A")${NC}"
+
+# 4. IDENTIFICAR IP ATUAL
+echo -e "\n${YELLOW}[4/7] IDENTIFICANDO IP ATUAL...${NC}"
 
 # IP da interface principal (excluindo loopback)
 CURRENT_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n 1)
@@ -72,8 +215,8 @@ else
     exit 1
 fi
 
-# 4. CONFIGURAR IP FIXO
-echo -e "\n${YELLOW}[4/6] CONFIGURANDO IP FIXO...${NC}"
+# 5. CONFIGURAR IP FIXO
+echo -e "\n${YELLOW}[5/7] CONFIGURANDO IP FIXO...${NC}"
 
 # Detecta a interface de rede principal
 INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n 1)
@@ -364,8 +507,8 @@ fi
 
 echo -e "${GREEN}Configuração de IP fixo concluída!${NC}"
 
-# 5. ATIVAR ROOT NO SSH
-echo -e "\n${YELLOW}[5/6] ATIVANDO ACESSO ROOT NO SSH...${NC}"
+# 6. ATIVAR ROOT NO SSH
+echo -e "\n${YELLOW}[6/7] ATIVANDO ACESSO ROOT NO SSH...${NC}"
 
 SSH_CONFIG="/etc/ssh/sshd_config"
 
@@ -416,8 +559,8 @@ else
     echo -e "${RED}Falha ao configurar SSH${NC}"
 fi
 
-# 6. LISTAR ARQUIVOS MODIFICADOS
-echo -e "\n${YELLOW}[6/6] RESUMO DOS ARQUIVOS MODIFICADOS...${NC}"
+# 7. LISTAR ARQUIVOS MODIFICADOS
+echo -e "\n${YELLOW}[7/7] RESUMO DOS ARQUIVOS MODIFICADOS...${NC}"
 
 echo -e "${BLUE}Arquivos modificados/backups criados:${NC}"
 if [ -d /etc/netplan ]; then
@@ -441,6 +584,9 @@ echo -e "${GREEN}✅ CONFIGURAÇÃO CONCLUÍDA COM SUCESSO!${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo -e "${YELLOW}Resumo:${NC}"
 echo -e "  • Sistema: $(cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)"
+echo -e "  • Data/Hora: $(date)"
+echo -e "  • Timezone: $(timedatectl 2>/dev/null | grep "Time zone" | awk '{print $3}')"
+echo -e "  • Servidores NTP: ntp.br"
 echo -e "  • IP Antigo: $CURRENT_IP"
 echo -e "  • IP Novo Fixo: $FIXED_IP"
 echo -e "  • Gateway: $GATEWAY"
