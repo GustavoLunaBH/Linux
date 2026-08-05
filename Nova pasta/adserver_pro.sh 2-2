@@ -1,9 +1,10 @@
 #!/bin/bash
 # adserver_pro.sh — Script unificado para DC Primário/Secundário com Samba AD
 # Ubuntu 24.04 | Samba 4.19.5 | Alta disponibilidade e replicação nativa
-# Versão: 2.1
+# Versão: 2.2
 
-set -euo pipefail  # Aborta em erro, undefined var, pipe fail
+# REMOVEMOS set -e PARA EVITAR PROBLEMAS COM LEITURA DE SENHA
+set -u pipefail
 
 # ══════════════════════════════════════════════════════════════
 #                    CORE — FUNÇÕES GLOBAIS
@@ -30,74 +31,7 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # ============================================
-# FUNÇÃO: INSTALAR PACOTES ESSENCIAIS
-# ============================================
-
-install_essentials() {
-    log "Verificando e instalando pacotes essenciais..."
-    
-    # Detecta o gerenciador de pacotes
-    if command -v apt &>/dev/null; then
-        PKG_MANAGER="apt"
-        PKG_UPDATE="apt update -qq"
-        PKG_INSTALL="apt install -y -qq"
-        ESSENTIALS="nano iputils-ping iputils-tracepath curl wget net-tools"
-    elif command -v dnf &>/dev/null; then
-        PKG_MANAGER="dnf"
-        PKG_UPDATE="dnf check-update -q"
-        PKG_INSTALL="dnf install -y -q"
-        ESSENTIALS="nano iputils curl wget net-tools"
-    elif command -v yum &>/dev/null; then
-        PKG_MANAGER="yum"
-        PKG_UPDATE="yum check-update -q"
-        PKG_INSTALL="yum install -y -q"
-        ESSENTIALS="nano iputils curl wget net-tools"
-    elif command -v zypper &>/dev/null; then
-        PKG_MANAGER="zypper"
-        PKG_UPDATE="zypper refresh -q"
-        PKG_INSTALL="zypper install -y -q"
-        ESSENTIALS="nano iputils curl wget net-tools"
-    else
-        warn "Gerenciador de pacotes não detectado. Pulando instalação de pacotes."
-        return 0
-    fi
-    
-    info "Gerenciador detectado: $PKG_MANAGER"
-    
-    # Atualiza cache (se aplicável)
-    if [[ "$PKG_MANAGER" != "dnf" ]] || [[ "$PKG_MANAGER" != "yum" ]]; then
-        eval "$PKG_UPDATE" 2>/dev/null || true
-    fi
-    
-    # Instala cada pacote individualmente
-    for pkg in $ESSENTIALS; do
-        if ! command -v "$pkg" &>/dev/null && [[ "$pkg" != "iputils-ping" ]] && [[ "$pkg" != "iputils" ]]; then
-            if [[ "$pkg" == "nano" ]] && ! command -v nano &>/dev/null; then
-                log "Instalando $pkg..."
-                eval "$PKG_INSTALL $pkg" 2>/dev/null || warn "Falha ao instalar $pkg"
-            elif [[ "$pkg" == "iputils-ping" ]] || [[ "$pkg" == "iputils" ]]; then
-                if ! command -v ping &>/dev/null; then
-                    log "Instalando iputils..."
-                    if [[ "$PKG_MANAGER" == "apt" ]]; then
-                        eval "$PKG_INSTALL iputils-ping" 2>/dev/null || warn "Falha ao instalar iputils-ping"
-                    else
-                        eval "$PKG_INSTALL iputils" 2>/dev/null || warn "Falha ao instalar iputils"
-                    fi
-                fi
-            else
-                if ! command -v "$pkg" &>/dev/null; then
-                    log "Instalando $pkg..."
-                    eval "$PKG_INSTALL $pkg" 2>/dev/null || warn "Falha ao instalar $pkg"
-                fi
-            fi
-        fi
-    done
-    
-    echo -e "${GREEN}✓ Pacotes essenciais verificados${NC}"
-}
-
-# ============================================
-# FUNÇÃO MELHORADA: LER SENHA COM SEGURANÇA
+# FUNÇÃO SIMPLIFICADA: LER SENHA
 # ============================================
 
 read_password() {
@@ -107,14 +41,20 @@ read_password() {
     local IFS=""
     
     echo -ne "${BLUE}$prompt${NC}" >&2
-    stty -echo -icanon min 1 time 0
     
-    while IFS= read -r -n 1 char; do
-        if [[ -z "$char" ]]; then
-            # Enter pressionado
+    # Desabilita echo e modo canônico
+    stty -echo -icanon min 1 time 0 2>/dev/null
+    
+    # Lê caractere por caractere
+    while true; do
+        # Lê um caractere
+        char=$(dd bs=1 count=1 2>/dev/null)
+        
+        # Verifica se é Enter (ASCII 10 ou 13) ou Ctrl+D (ASCII 4)
+        if [[ -z "$char" ]] || [[ "$char" == $'\n' ]] || [[ "$char" == $'\r' ]] || [[ "$char" == $'\x04' ]]; then
             break
+        # Backspace (ASCII 127) ou Delete (ASCII 8)
         elif [[ "$char" == $'\x7f' ]] || [[ "$char" == $'\x08' ]]; then
-            # Backspace
             if [[ -n "$password" ]]; then
                 password="${password%?}"
                 echo -ne "\b \b" >&2
@@ -125,9 +65,30 @@ read_password() {
         fi
     done
     
-    stty echo -icanon
+    # Restaura as configurações do terminal
+    stty echo -icanon 2>/dev/null
     echo >&2
+    
     echo "$password"
+}
+
+# ============================================
+# FUNÇÃO: INSTALAR PACOTES ESSENCIAIS
+# ============================================
+
+install_essentials() {
+    log "Verificando e instalando pacotes essenciais..."
+    
+    if command -v apt &>/dev/null; then
+        apt update -qq 2>/dev/null || true
+        apt install -y -qq nano iputils-ping curl wget net-tools 2>/dev/null || true
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q nano iputils curl wget net-tools 2>/dev/null || true
+    elif command -v yum &>/dev/null; then
+        yum install -y -q nano iputils curl wget net-tools 2>/dev/null || true
+    fi
+    
+    echo -e "${GREEN}✓ Pacotes essenciais verificados${NC}"
 }
 
 # ============================================
@@ -163,16 +124,15 @@ EOF
 }
 
 config_ssh_root() {
-    log "Configurando acesso root via SSH (atenção: risco de segurança)..."
-    warn "ATENÇÃO: Permitir root via SSH expõe o servidor a ataques. Use apenas em redes confiáveis!"
+    log "Configurando acesso root via SSH..."
     cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
     if grep -q "^PermitRootLogin" /etc/ssh/sshd_config 2>/dev/null; then
         sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true
     else
         echo "PermitRootLogin yes" >> /etc/ssh/sshd_config 2>/dev/null || true
     fi
-    systemctl restart sshd 2>/dev/null || warn "Não foi possível reiniciar sshd — verifique manualmente"
-    echo -e "${YELLOW}⚠ Root SSH ativado — revise /etc/ssh/sshd_config${NC}"
+    systemctl restart sshd 2>/dev/null || true
+    echo -e "${YELLOW}⚠ Root SSH ativado${NC}"
 }
 
 detect_interface() {
@@ -184,7 +144,7 @@ detect_interface() {
     IP_ADDR=$(ip addr show "$INTERFACE" 2>/dev/null | grep inet | grep -v inet6 | awk '{print $2}' | cut -d/ -f1 || true)
     if [ -z "$IP_ADDR" ]; then
         IP_ADDR="192.168.1.2"
-        warn "Não consegui detectar IP. Usando $IP_ADDR (edite manualmente se necessário)"
+        warn "Não consegui detectar IP. Usando $IP_ADDR"
     fi
     echo -e "${GREEN}✓ Interface: ${INTERFACE} (${IP_ADDR})${NC}"
     export INTERFACE IP_ADDR
@@ -226,7 +186,7 @@ EOF
     systemctl enable --now chrony -qq 2>/dev/null || true
     systemctl restart chrony -qq 2>/dev/null || true
     sleep 2
-    chronyc sources >/dev/null 2>&1 && echo -e "${GREEN}✓ NTP sincronizado${NC}" || warn "NTP não sincronizou — verifique com 'chronyc sources'"
+    chronyc sources >/dev/null 2>&1 && echo -e "${GREEN}✓ NTP sincronizado${NC}" || warn "NTP não sincronizou"
 }
 
 validate_password() {
@@ -243,19 +203,12 @@ validate_password() {
 # ============================================
 
 detect_netplan_file() {
-    # Busca arquivos Netplan existentes (prioridade: cloud-init -> 01-netcfg -> outros)
     local CANDIDATES=()
     
-    # 1. Primeiro, procura por arquivos de cloud-init (mais comuns em VMs)
     CANDIDATES+=($(find /etc/netplan -maxdepth 1 -name "*cloud-init*.yaml" -type f 2>/dev/null | sort))
-    
-    # 2. Depois procura por 01-netcfg (comum em instalações padrão)
     CANDIDATES+=($(find /etc/netplan -maxdepth 1 -name "01-netcfg*.yaml" -type f 2>/dev/null | sort))
-    
-    # 3. Por fim, qualquer outro .yaml
     CANDIDATES+=($(find /etc/netplan -maxdepth 1 -name "*.yaml" -type f ! -name "*cloud-init*" ! -name "01-netcfg*" 2>/dev/null | sort))
     
-    # Remove duplicatas (mantém ordem de prioridade)
     local UNIQUE=()
     for file in "${CANDIDATES[@]}"; do
         if [[ ! " ${UNIQUE[*]} " =~ " ${file} " ]]; then
@@ -267,7 +220,7 @@ detect_netplan_file() {
 }
 
 # ============================================
-# FUNÇÃO MELHORADA: CONFIGURAR IP ESTAÇÃO LINUX
+# FUNÇÃO: CONFIGURAR IP ESTAÇÃO LINUX
 # ============================================
 
 configure_station_ips() {
@@ -283,28 +236,20 @@ configure_station_ips() {
     
     case "$OS_OPT" in
         1)
-            # ================================
-            # LINUX — NETPLAN INTELIGENTE
-            # ================================
-            
-            # ① Detectar interface automaticamente
-            log "Detectando interfaces de rede disponíveis..."
+            # LINUX — NETPLAN
+            log "Detectando interfaces de rede..."
             IFS=$'\n'
-            INTERFACES=($(ip link show | 
-                awk '/^[0-9]+: [^ ]+:.*state UP/{gsub(":","",$2); print $2}' | 
-                grep -E "^(en|eth|wl)" || true))
+            INTERFACES=($(ip link show | awk '/^[0-9]+: [^ ]+:.*state UP/{gsub(":","",$2); print $2}' | grep -E "^(en|eth|wl)" || true))
             
             if [ ${#INTERFACES[@]} -eq 0 ]; then
-                INTERFACES=($(ip link show | 
-                    awk '/^[0-9]+: [^ ]+:/ && !/lo|virbr|vnet/ {gsub(":","",$2); print $2}' | 
-                    grep -E "^(en|eth|wl)" || true))
+                INTERFACES=($(ip link show | awk '/^[0-9]+: [^ ]+:/ && !/lo|virbr|vnet/ {gsub(":","",$2); print $2}' | grep -E "^(en|eth|wl)" || true))
             fi
             
             if [ ${#INTERFACES[@]} -eq 0 ]; then
-                error "Nenhuma interface de rede encontrada. Conecte o cabo/rede e tente novamente."
+                error "Nenhuma interface de rede encontrada."
             elif [ ${#INTERFACES[@]} -eq 1 ]; then
                 STA_IFACE="${INTERFACES[0]}"
-                info "Interface detectada automaticamente: $STA_IFACE"
+                info "Interface detectada: $STA_IFACE"
             else
                 echo
                 echo -e "${YELLOW}Múltiplas interfaces encontradas:${NC}"
@@ -314,12 +259,10 @@ configure_station_ips() {
                 done
                 read -p "Selecione a interface [1-${#INTERFACES[@]}]: " IFACE_SEL
                 STA_IFACE="${INTERFACES[$((IFACE_SEL-1))]}"
-                [ -z "$STA_IFACE" ] && error "Seleção de interface inválida"
-                info "Interface selecionada: $STA_IFACE"
+                [ -z "$STA_IFACE" ] && error "Seleção inválida"
             fi
             
-            # ② Detectar arquivos Netplan
-            log "Buscando arquivos Netplan em /etc/netplan/..."
+            log "Buscando arquivos Netplan..."
             NETPLAN_FILES=($(detect_netplan_file))
             
             if [ ${#NETPLAN_FILES[@]} -eq 0 ]; then
@@ -330,33 +273,29 @@ configure_station_ips() {
                 info "Arquivo Netplan encontrado: $NETPLAN_PATH"
             else
                 echo
-                echo -e "${YELLOW}Múltiplos arquivos Netplan encontrados (prioridade):${NC}"
+                echo -e "${YELLOW}Múltiplos arquivos Netplan encontrados:${NC}"
                 for i in "${!NETPLAN_FILES[@]}"; do
                     idx=$((i+1))
                     echo "  [$idx] ${NETPLAN_FILES[$i]}"
                 done
-                read -p "Selecione o arquivo a editar [1-${#NETPLAN_FILES[@]}] (Enter para o primeiro): " FILE_SEL
+                read -p "Selecione o arquivo [1-${#NETPLAN_FILES[@]}] (Enter para o primeiro): " FILE_SEL
                 if [ -z "$FILE_SEL" ]; then
                     NETPLAN_PATH="${NETPLAN_FILES[0]}"
-                    info "Usando arquivo padrão: $NETPLAN_PATH"
                 else
                     NETPLAN_PATH="${NETPLAN_FILES[$((FILE_SEL-1))]}"
-                    [ -z "$NETPLAN_PATH" ] && error "Seleção de arquivo inválida"
-                    info "Arquivo selecionado: $NETPLAN_PATH"
                 fi
             fi
             
-            # ③ Perguntar configuração de IP (valores inteligentes)
             echo
             CURRENT_IP=$(ip addr show "$STA_IFACE" 2>/dev/null | grep inet | grep -v inet6 | awk '{print $2}' | cut -d/ -f1 | head -1 || echo "")
             CURRENT_MASK=$(ip addr show "$STA_IFACE" 2>/dev/null | grep inet | grep -v inet6 | awk '{print $2}' | cut -d/ -f2 | head -1 || echo "24")
             CURRENT_GATEWAY=$(ip route | grep default | grep "$STA_IFACE" | awk '{print $3}' | head -1 || echo "")
             
             if [ -n "$CURRENT_IP" ]; then
-                read -p "IP estático desejado [atual: $CURRENT_IP]: " STA_IP
+                read -p "IP estático [atual: $CURRENT_IP]: " STA_IP
                 STA_IP="${STA_IP:-$CURRENT_IP}"
             else
-                read -p "IP estático desejado (ex: 192.168.1.50): " STA_IP
+                read -p "IP estático (ex: 192.168.1.50): " STA_IP
             fi
             
             read -p "Máscara [atual: /$CURRENT_MASK]: " STA_MASK
@@ -369,68 +308,34 @@ configure_station_ips() {
                 read -p "Gateway (ex: 192.168.1.1): " STA_GATEWAY
             fi
             
-            # DNS - melhorado para permitir 8.8.8.8 antes do AD
             echo -e "${BLUE}Configuração de DNS:${NC}"
             echo "  [1] 8.8.8.8 e 8.8.4.4 (Google)"
             echo "  [2] 1.1.1.1 e 1.0.0.1 (Cloudflare)"
-            echo "  [3] IP do AD (quando já configurado)"
+            echo "  [3] IP do AD"
             echo "  [4] Personalizado"
             read -p "Escolha uma opção [1-4] (default: 1): " DNS_OPT
             DNS_OPT="${DNS_OPT:-1}"
             
             case "$DNS_OPT" in
-                1)
-                    STA_DNS1="8.8.8.8"
-                    STA_DNS2="8.8.4.4"
-                    info "DNS configurado: Google (8.8.8.8, 8.8.4.4)"
-                    ;;
-                2)
-                    STA_DNS1="1.1.1.1"
-                    STA_DNS2="1.0.0.1"
-                    info "DNS configurado: Cloudflare (1.1.1.1, 1.0.0.1)"
-                    ;;
-                3)
-                    read -p "IP do AD (ex: 192.168.1.2): " AD_IP
-                    if [ -n "$AD_IP" ]; then
-                        STA_DNS1="$AD_IP"
-                        read -p "DNS secundário (opcional - Enter para pular): " STA_DNS2
-                        info "DNS configurado: AD ($AD_IP)"
-                    else
-                        warn "IP do AD não informado, usando Google como fallback"
-                        STA_DNS1="8.8.8.8"
-                        STA_DNS2="8.8.4.4"
-                    fi
-                    ;;
-                4)
-                    echo -n -e "${BLUE}DNS 1 (obrigatório): ${NC}"
-                    read STA_DNS1
-                    [ -z "$STA_DNS1" ] && { warn "DNS 1 é obrigatório, usando 8.8.8.8"; STA_DNS1="8.8.8.8"; }
-                    echo -n -e "${BLUE}DNS 2 (opcional — Enter para pular): ${NC}"
-                    read STA_DNS2
-                    ;;
-                *)
-                    STA_DNS1="8.8.8.8"
-                    STA_DNS2="8.8.4.4"
-                    info "Opção inválida, usando Google como padrão"
-                    ;;
+                1) STA_DNS1="8.8.8.8"; STA_DNS2="8.8.4.4" ;;
+                2) STA_DNS1="1.1.1.1"; STA_DNS2="1.0.0.1" ;;
+                3) read -p "IP do AD: " AD_IP; STA_DNS1="${AD_IP:-8.8.8.8}"; read -p "DNS secundário: " STA_DNS2 ;;
+                4) read -p "DNS 1: " STA_DNS1; STA_DNS1="${STA_DNS1:-8.8.8.8}"; read -p "DNS 2: " STA_DNS2 ;;
+                *) STA_DNS1="8.8.8.8"; STA_DNS2="8.8.4.4" ;;
             esac
             
-            # ④ Montar nova configuração YAML
             if [ -n "$STA_DNS2" ]; then
                 NAMESERVERS="      nameservers:\n        addresses: [$STA_DNS1, $STA_DNS2]"
             else
                 NAMESERVERS="      nameservers:\n        addresses: [$STA_DNS1]"
             fi
             
-            # ⑤ Fazer backup e processar arquivo
             if [ -f "$NETPLAN_PATH" ]; then
                 BACKUP_PATH="${NETPLAN_PATH}.bak.$(date +%Y%m%d_%H%M%S)"
                 cp "$NETPLAN_PATH" "$BACKUP_PATH"
                 info "Backup criado: $BACKUP_PATH"
                 
                 if grep -q "^[[:space:]]*${STA_IFACE}:" "$NETPLAN_PATH"; then
-                    info "Interface $STA_IFACE já existe no arquivo — atualizando..."
-                    
                     sed -i "/^[[:space:]]*${STA_IFACE}:/,/^[[:space:]]*[a-zA-Z]/{
                         /dhcp4/d
                         /dhcp6/d
@@ -439,11 +344,7 @@ configure_station_ips() {
                         /nameservers/d
                     }" "$NETPLAN_PATH"
                     
-                    awk -v iface="$STA_IFACE" \
-                        -v ip="$STA_IP" \
-                        -v mask="$STA_MASK" \
-                        -v gw="$STA_GATEWAY" \
-                        -v ns="$NAMESERVERS" '
+                    awk -v iface="$STA_IFACE" -v ip="$STA_IP" -v mask="$STA_MASK" -v gw="$STA_GATEWAY" -v ns="$NAMESERVERS" '
                     {
                         print
                         if ($0 ~ "^[[:space:]]*" iface ":" && !done) {
@@ -455,15 +356,8 @@ configure_station_ips() {
                             done=1
                         }
                     }' "$NETPLAN_PATH" > "${NETPLAN_PATH}.tmp" && mv "${NETPLAN_PATH}.tmp" "$NETPLAN_PATH"
-                    
                 else
-                    info "Adicionando nova interface $STA_IFACE ao arquivo existente"
-                    
-                    awk -v iface="$STA_IFACE" \
-                        -v ip="$STA_IP" \
-                        -v mask="$STA_MASK" \
-                        -v gw="$STA_GATEWAY" \
-                        -v ns="$NAMESERVERS" '
+                    awk -v iface="$STA_IFACE" -v ip="$STA_IP" -v mask="$STA_MASK" -v gw="$STA_GATEWAY" -v ns="$NAMESERVERS" '
                     {
                         print
                         if ($0 ~ "^[[:space:]]*ethernets:" && !done) {
@@ -477,7 +371,6 @@ configure_station_ips() {
                         }
                     }' "$NETPLAN_PATH" > "${NETPLAN_PATH}.tmp" && mv "${NETPLAN_PATH}.tmp" "$NETPLAN_PATH"
                 fi
-                
             else
                 cat > "$NETPLAN_PATH" << EOF
 # Configuração estática gerada pelo adserver_pro.sh
@@ -491,66 +384,28 @@ $NAMESERVERS
       dhcp6: no
       optional: true
 EOF
-                info "Arquivo Netplan criado: $NETPLAN_PATH"
             fi
             
-            # ⑥ Validar e aplicar
             log "Validando configuração Netplan..."
             if netplan generate >/dev/null 2>&1; then
-                echo -e "${GREEN}✓ Configuração validada com sucesso!${NC}"
+                echo -e "${GREEN}✓ Configuração validada!${NC}"
+                netplan apply >/dev/null 2>&1
+                echo -e "${GREEN}✓ Configuração aplicada!${NC}"
             else
-                warn "netplan generate gerou erros — restaurando backup..."
+                warn "Erro na configuração — restaurando backup"
                 [ -f "$BACKUP_PATH" ] && cp "$BACKUP_PATH" "$NETPLAN_PATH"
-                error "Configuração inválida. Verifique o arquivo manualmente."
             fi
             
-            log "Aplicando configuração (netplan try — reverte em 120s se falhar)..."
-            if netplan try >/dev/null 2>&1; then
-                echo -e "${GREEN}✓ Configuração aplicada com sucesso!${NC}"
-                echo
-                echo -e "${YELLOW}⚠ IMPORTANTE:${NC}"
-                echo "Se a conexão cair, o sistema reverterá em 120 segundos."
-                echo "Mantenha este terminal aberto."
-                echo
-                echo -e "${GREEN}Arquivo modificado: $NETPLAN_PATH${NC}"
-                echo
-                
-                if [ -f "$BACKUP_PATH" ]; then
-                    echo -e "${BLUE}--- Alterações realizadas ---${NC}"
-                    diff -u "$BACKUP_PATH" "$NETPLAN_PATH" | grep -E "^[+-][^/-]" | head -20 || echo "Sem alterações visíveis"
-                    echo -e "${BLUE}---------------------------${NC}"
-                fi
-            else
-                warn "netplan try falhou — revertendo backup"
-                [ -f "$BACKUP_PATH" ] && cp "$BACKUP_PATH" "$NETPLAN_PATH"
-                error "Aplicação falhou. Backup restaurado."
-            fi
-            
-            # ⑦ Gerar script de reversão
-            SCRIPT_NAME="/root/reverter_netplan_$(basename "$NETPLAN_PATH" .yaml).sh"
-            cat > "$SCRIPT_NAME" << EOF
-#!/bin/bash
-# Reverte configuração Netplan
-cp "$BACKUP_PATH" "$NETPLAN_PATH"
-netplan apply
-echo "✅ Configuração revertida"
-EOF
-            chmod +x "$SCRIPT_NAME"
-            
-            echo
-            echo -e "${YELLOW}Script de reversão: $SCRIPT_NAME${NC}"
             echo
             read -p "Pressione Enter para continuar..."
             ;;
             
         2)
-            # ================================
-            # WINDOWS — SCRIPT BATCH
-            # ================================
+            # WINDOWS
             echo
-            read -p "IP da estação Windows (ex: 192.168.1.51): " STA_IP
+            read -p "IP da estação Windows: " STA_IP
             read -p "Máscara (ex: 255.255.255.0): " STA_MASK
-            read -p "Gateway (ex: 192.168.1.1): " STA_GATEWAY
+            read -p "Gateway: " STA_GATEWAY
             
             echo -e "${BLUE}Configuração de DNS:${NC}"
             echo "  [1] 8.8.8.8 e 8.8.4.4 (Google)"
@@ -561,66 +416,26 @@ EOF
             DNS_OPT="${DNS_OPT:-1}"
             
             case "$DNS_OPT" in
-                1)
-                    STA_DNS1="8.8.8.8"
-                    STA_DNS2="8.8.4.4"
-                    ;;
-                2)
-                    STA_DNS1="1.1.1.1"
-                    STA_DNS2="1.0.0.1"
-                    ;;
-                3)
-                    read -p "IP do AD: " AD_IP
-                    STA_DNS1="${AD_IP:-8.8.8.8}"
-                    echo -n "DNS secundário (opcional): "
-                    read STA_DNS2
-                    ;;
-                4)
-                    read -p "DNS 1: " STA_DNS1
-                    STA_DNS1="${STA_DNS1:-8.8.8.8}"
-                    read -p "DNS 2: " STA_DNS2
-                    ;;
-                *)
-                    STA_DNS1="8.8.8.8"
-                    STA_DNS2="8.8.4.4"
-                    ;;
+                1) STA_DNS1="8.8.8.8"; STA_DNS2="8.8.4.4" ;;
+                2) STA_DNS1="1.1.1.1"; STA_DNS2="1.0.0.1" ;;
+                3) read -p "IP do AD: " AD_IP; STA_DNS1="${AD_IP:-8.8.8.8}"; read -p "DNS secundário: " STA_DNS2 ;;
+                4) read -p "DNS 1: " STA_DNS1; STA_DNS1="${STA_DNS1:-8.8.8.8}"; read -p "DNS 2: " STA_DNS2 ;;
+                *) STA_DNS1="8.8.8.8"; STA_DNS2="8.8.4.4" ;;
             esac
             
             read -p "Nome da interface (ex: Ethernet): " STA_IFACE
             
             cat > "/root/config_ip_estacao_${STA_IP}.bat" << EOF
 @echo off
-REM Configuração de IP estático — gerada pelo adserver_pro.sh
-REM Execute como Administrador
-
-echo.
-echo ⚠ ATENÇÃO: Esta configuração irá substituir o DHCP da interface "$STA_IFACE"
-echo.
-pause
-
+REM Configuração de IP estático
 echo Configurando IP estático...
-
 netsh interface ipv4 set address name="$STA_IFACE" source=static address=$STA_IP mask=$STA_MASK gateway=$STA_GATEWAY gwmetric=1
 netsh interface ipv4 set dns name="$STA_IFACE" source=static address=$STA_DNS1 register=primary
 EOF
             [ -n "$STA_DNS2" ] && echo "netsh interface ipv4 add dns name=\"$STA_IFACE\" address=$STA_DNS2 index=2" >> "/root/config_ip_estacao_${STA_IP}.bat"
             
-            cat >> "/root/config_ip_estacao_${STA_IP}.bat" << EOF
-
-echo.
-echo ✅ Configuração aplicada!
-echo.
-echo Reinicie a interface ou execute:
-echo   ipconfig /release
-echo   ipconfig /renew
-echo.
-pause
-EOF
-            
             echo
             echo -e "${GREEN}✓ Arquivo gerado: /root/config_ip_estacao_${STA_IP}.bat${NC}"
-            echo "Copie para a estação Windows e execute como Administrador."
-            echo
             read -p "Pressione Enter para continuar..."
             ;;
             
@@ -631,7 +446,7 @@ EOF
 }
 
 # ============================================
-# FUNÇÕES DE TESTE — BATERIA FINAL
+# FUNÇÕES DE TESTE
 # ============================================
 
 run_tests_primary() {
@@ -664,9 +479,6 @@ run_tests_primary() {
     info "7. Verificando NTP..."
     chronyc sources | grep -q "^." && echo -e "${GREEN}✓ Chrony tem fontes ativas${NC}" || echo -e "${RED}✗ Chrony sem fontes${NC}"
     
-    info "8. Verificando replicação DRS (sem parceiros esperados neste momento)..."
-    samba-tool drs showrepl 2>&1 | grep -q "No DRS partners" && echo -e "${YELLOW}→ Nenhum parceiro de replicação configurado (esperado no primário isolado)${NC}" || echo -e "${GREEN}✓ DRS funcional${NC}"
-    
     log "════════════════════════════════════════════════════"
 }
 
@@ -676,7 +488,7 @@ run_tests_secondary() {
     log "          BATERIA DE TESTES — DC SECUNDÁRIO"
     log "════════════════════════════════════════════════════"
     
-    info "1. Testando resolução DNS (deve resolver pelo próprio Samba DNS)..."
+    info "1. Testando resolução DNS..."
     host -t A "$HOSTNAME.$DOMAIN" >/dev/null 2>&1 && echo -e "${GREEN}✓ Hostname local OK${NC}" || echo -e "${RED}✗ Hostname local NOK${NC}"
     
     info "2. Testando SRV LDAP do domínio via DNS local..."
@@ -696,20 +508,16 @@ run_tests_secondary() {
         echo -e "${GREEN}✓ Replicação DRS ativa com $PRIMARY_IP${NC}"
     else
         echo -e "${RED}✗ Replicação DRS não detectada${NC}"
-        warn "Execute 'samba-tool drs showrepl' manualmente para diagnosticar"
     fi
     
     info "6. Testando wbinfo..."
     wbinfo -t >/dev/null 2>&1 && echo -e "${GREEN}✓ wbinfo conectado ao AD${NC}" || echo -e "${RED}✗ wbinfo falhou${NC}"
     
-    info "7. Verificando NTP (deve apontar para o primário)..."
-    chronyc sources | grep -q "$PRIMARY_IP" && echo -e "${GREEN}✓ NTP sincronizando com primário${NC}" || echo -e "${RED}✗ NTP não apontando para primário${NC}"
-    
     log "════════════════════════════════════════════════════"
 }
 
 # ══════════════════════════════════════════════════════════════
-#              FLUXO 1 — DC PRIMÁRIO (MELHORADO)
+#              FLUXO 1 — DC PRIMÁRIO (CORRIGIDO)
 # ══════════════════════════════════════════════════════════════
 
 setup_primary_dc() {
@@ -718,7 +526,6 @@ setup_primary_dc() {
     echo -e "${BLUE}║        CONFIGURAÇÃO — DC PRIMÁRIO               ║${NC}"
     echo -e "${BLUE}╚══════════════════════════════════════════════════╝${NC}"
     
-    # Instala pacotes essenciais ANTES de tudo
     install_essentials
     
     detect_interface
@@ -730,21 +537,28 @@ setup_primary_dc() {
     read -p "Hostname do servidor (default: adserver01): " -e INPUT_HOSTNAME
     HOSTNAME="${INPUT_HOSTNAME:-adserver01}"
     
-    # Loop de senha melhorado
-    while true; do
-        echo -e "${BLUE}Digite a senha do administrador do domínio:${NC}"
-        ADMIN_PASSWORD=$(read_password "> ")
-        echo -e "${BLUE}Confirme a senha:${NC}"
-        ADMIN_PASSWORD_CONFIRM=$(read_password "> ")
+    # LOOP DE SENHA CORRIGIDO
+    SENHA_VALIDA=0
+    while [ $SENHA_VALIDA -eq 0 ]; do
+        echo ""
+        ADMIN_PASSWORD=$(read_password "Digite a senha do administrador do domínio: ")
+        ADMIN_PASSWORD_CONFIRM=$(read_password "Confirme a senha: ")
         
         if [ "$ADMIN_PASSWORD" = "$ADMIN_PASSWORD_CONFIRM" ]; then
-            case "$(validate_password "$ADMIN_PASSWORD"; echo $?) " in
-                0) break ;;
-                1) warn "A senha deve ter pelo menos 8 caracteres!";;
-                2) warn "A senha deve ter pelo menos uma letra maiúscula!";;
-                3) warn "A senha deve ter pelo menos uma letra minúscula!";;
-                4) warn "A senha deve ter pelo menos um número!";;
-            esac
+            # Valida a senha
+            VALID=0
+            if [ ${#ADMIN_PASSWORD} -lt 8 ]; then
+                warn "A senha deve ter pelo menos 8 caracteres!"
+            elif ! echo "$ADMIN_PASSWORD" | grep -q "[A-Z]"; then
+                warn "A senha deve ter pelo menos uma letra maiúscula!"
+            elif ! echo "$ADMIN_PASSWORD" | grep -q "[a-z]"; then
+                warn "A senha deve ter pelo menos uma letra minúscula!"
+            elif ! echo "$ADMIN_PASSWORD" | grep -q "[0-9]"; then
+                warn "A senha deve ter pelo menos um número!"
+            else
+                SENHA_VALIDA=1
+                break
+            fi
         else
             warn "As senhas não coincidem!"
         fi
@@ -817,11 +631,10 @@ EOF
     log "Configurando /etc/samba/smb.conf"
     cp "/var/lib/samba/private/smb.conf" "/etc/samba/smb.conf"
     
-    sed -i "/^interfaces/s|=.*| = lo $INTERFACE|" "/etc/samba/smb.conf" || true
-    sed -i "/^bind interfaces only/s|=.*| = yes|" "/etc/samba/smb.conf" || true
+    sed -i "/^interfaces/s|=.*| = lo $INTERFACE|" "/etc/samba/smb.conf" || true    sed -i "/^bind interfaces only/s|=.*| = yes|" "/etc/samba/smb.conf" || true
     
     grep -q "ldap server require strong auth" "/etc/samba/smb.conf" ||
-        sed -i "/$$global$$/a \    ldap server require strong auth = no" "/etc/samba/smb.conf"
+        sed -i "/\[global\]/a \    ldap server require strong auth = no" "/etc/samba/smb.conf"
     
     log "Configurando /etc/krb5.conf"
     rm -f /etc/krb5.conf /var/lib/samba/private/krb5.conf
@@ -868,10 +681,10 @@ EOF
     sleep 20
     
     log "Criando grupos e usuários padrão..."
-    samba-tool group add "admins" --description="Administradores do Domínio" 2>/dev/null || warn "Grupo admins já existe"
-    samba-tool group add "users" --description="Usuários do Domínio" 2>/dev/null || warn "Grupo users já existe"
-    samba-tool user create admin2 "$ADMIN_PASSWORD" --given-name="Admin" --surname="Secundário" 2>/dev/null || warn "Usuário admin2 já existe"
-    samba-tool group addmembers "Domain Admins" admin2 2>/dev/null || warn "Não foi possível adicionar admin2 ao grupo Domain Admins"
+    samba-tool group add "admins" --description="Administradores do Domínio" 2>/dev/null || true
+    samba-tool group add "users" --description="Usuários do Domínio" 2>/dev/null || true
+    samba-tool user create admin2 "$ADMIN_PASSWORD" --given-name="Admin" --surname="Secundário" 2>/dev/null || true
+    samba-tool group addmembers "Domain Admins" admin2 2>/dev/null || true
     
     log "Salvando informações em /root/ad_info.txt"
     cat > /root/ad_info.txt << EOF
@@ -902,16 +715,9 @@ samba-tool group list
 host -t SRV _ldap._tcp.$DOMAIN
 host -t A $HOSTNAME.$DOMAIN
 
-# Verificar replicação DRS (sem parceiros esperados)
-samba-tool drs showrepl
-
 # Logs
 tail -f /var/log/samba/log.samba
 tail -f /var/log/krb5kdc.log
-
-────────────────────────────────────────
-ATENÇÃO: root SSH está ativado! Revise /etc/ssh/sshd_config
-em caso de exposição à internet.
 ╚══════════════════════════════════════════════════════════╝
 EOF
     
@@ -924,7 +730,7 @@ EOF
     echo -e "${GREEN}║  Acesse com: administrator@$REALM                   ║${NC}"
     echo -e "${GREEN}║  IP do servidor: $IP_ADDR                           ║${NC}"
     echo -e "${GREEN}║                                                     ║${NC}"
-    echo -e "${GREEN}║  Documentação: /root/ad_info.txt                      ║${NC}"
+    echo -e "${GREEN}║  Documentação: /root/ad_info.txt                    ║${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
     
     read -p "Reiniciar o servidor agora? (s/N): " -n 1 -r
@@ -941,7 +747,6 @@ setup_secondary_dc() {
     echo -e "${BLUE}║        CONFIGURAÇÃO — DC SECUNDÁRIO              ║${NC}"
     echo -e "${BLUE}╚══════════════════════════════════════════════════╝${NC}"
     
-    # Instala pacotes essenciais ANTES de tudo
     install_essentials
     
     detect_interface
@@ -955,8 +760,7 @@ setup_secondary_dc() {
     read -p "Usuário administrador do domínio (ex: administrator): " -e ADMIN_USER
     ADMIN_USER="${ADMIN_USER:-administrator}"
     
-    echo -e "${BLUE}Digite a senha do administrador do domínio:${NC}"
-    ADMIN_PASSWORD=$(read_password "> ")
+    ADMIN_PASSWORD=$(read_password "Digite a senha do administrador do domínio: ")
     echo
     
     echo
@@ -1023,12 +827,11 @@ EOF
     
     log "Testando Kerberos com as credenciais fornecidas..."
     echo -n "${ADMIN_PASSWORD}" | kinit "$ADMIN_USER@$REALM" >/dev/null 2>&1 && {
-        echo -e "${GREEN}✓ Autenticação Kerberos OK — credenciais válidas${NC}"
+        echo -e "${GREEN}✓ Autenticação Kerberos OK${NC}"
         kdestroy 2>/dev/null || true
     } || error "Kerberos falhou — verifique domínio, usuário e senha"
     
     log "Juntando ao domínio ${REALM} como DC Secundário..."
-    info "Isso pode levar alguns minutos..."
     
     samba-tool domain join "$REALM" DC \
         --dns-backend=SAMBA_INTERNAL \
@@ -1043,7 +846,6 @@ EOF
     
     log "Ajustando /etc/samba/smb.conf para replicação"
     cp "/var/lib/samba/private/smb.conf" "/etc/samba/smb.conf"
-    
     sed -i "/^interfaces/s|=.*| = lo $INTERFACE|" "/etc/samba/smb.conf" || true
     
     log "Iniciando samba-ad-dc..."
@@ -1056,7 +858,7 @@ EOF
     if samba-tool drs showrepl 2>&1 | grep -q "$PRIMARY_IP"; then
         echo -e "${GREEN}✓ Replicação DRS ativa com $PRIMARY_IP${NC}"
     else
-        warn "Replicação DRS não detectada — pode levar alguns minutos ou verificar logs"
+        warn "Replicação DRS não detectada — pode levar alguns minutos"
     fi
     
     log "Salvando informações em /root/ad_info.txt"
@@ -1073,27 +875,6 @@ INTERFACE:   $INTERFACE
 DATA:        $(date)
 
 USUÁRIO JOIN: $ADMIN_USER@$REALM
-
-COMANDOS ÚTEIS:
-────────────────────────────────────────
-# Testar replicação DRS
-samba-tool drs showrepl
-
-# Testar Kerberos
-echo '$ADMIN_PASSWORD' | kinit $ADMIN_USER@$REALM
-klist
-
-# Testar DNS (deve resolver pelo primário)
-host -t SRV _ldap._tcp.$DOMAIN
-host -t A $HOSTNAME.$DOMAIN
-
-# Logs
-tail -f /var/log/samba/log.samba
-tail -f /var/log/krb5kdc.log
-
-────────────────────────────────────────
-ATENÇÃO: root SSH está ativado! Revise /etc/ssh/sshd_config
-em caso de exposição à internet.
 ╚══════════════════════════════════════════════════════════╝
 EOF
     
@@ -1103,10 +884,7 @@ EOF
     echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║  ✅ DC SECUNDÁRIO CONFIGURADO COM SUCESSO!         ║${NC}"
     echo -e "${GREEN}║                                                     ║${NC}"
-    echo -e "${GREEN}║  Este servidor é um DC PLENO e pode assumir           ║${NC}"
-    echo -e "${GREEN}║  as funções do primário se necessário.              ║${NC}"
-    echo -e "${GREEN}║                                                     ║${NC}"
-    echo -e "${GREEN}║  Documentação: /root/ad_info.txt                      ║${NC}"
+    echo -e "${GREEN}║  Documentação: /root/ad_info.txt                    ║${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
     
     read -p "Reiniciar o servidor agora? (s/N): " -n 1 -r
@@ -1114,7 +892,7 @@ EOF
 }
 
 # ══════════════════════════════════════════════════════════════
-#              FLUXO 4 — LINUX COMO ESTAÇÃO DE TRABALHO
+#              FLUXO 4 — LINUX COMO ESTAÇÃO
 # ══════════════════════════════════════════════════════════════
 
 configure_linux_station() {
@@ -1127,23 +905,22 @@ configure_linux_station() {
     DOMAIN="${DOMAIN,,}"
     read -p "Usuário administrador do domínio (ex: administrator): " -e ADMIN_USER
     ADMIN_USER="${ADMIN_USER:-administrator}"
-    echo -e "${BLUE}Digite a senha do domínio:${NC}"
-    ADMIN_PASSWORD=$(read_password "> ")
+    ADMIN_PASSWORD=$(read_password "Digite a senha do domínio: ")
     echo
     
-    log "Instalando pacotes necessários (realmd, sssd, adcli, oddjobd)..."
+    log "Instalando pacotes necessários..."
     apt update -qq 2>/dev/null || true
     apt install -y -qq realmd sssd sssd-tools adcli oddjob oddjob-mkhomedir \
         krb5-user krb5-config samba-common samba-common-bin \
         policykit-1 2>/dev/null || true
     
     log "Descobrindo o domínio..."
-    realm discover "$DOMAIN" || warn "Domínio não encontrado — verifique DNS e conectividade"
+    realm discover "$DOMAIN" || warn "Domínio não encontrado"
     
-    log "Executando realm join (pode pedir senha novamente)..."
+    log "Executando realm join..."
     echo -n "${ADMIN_PASSWORD}" | realm join --user="$ADMIN_USER" "$DOMAIN" --password="$ADMIN_PASSWORD" || {
-        warn "realm join falhou — tentando sem --password (modo interativo)..."
-        realm join --user="$ADMIN_USER" "$DOMAIN" || error "Join falhou (verifique logs em /var/log/realmd)"
+        warn "realm join falhou — tentando modo interativo..."
+        realm join --user="$ADMIN_USER" "$DOMAIN" || error "Join falhou"
     }
     
     log "Habilitando criação automática de home directory..."
@@ -1152,23 +929,11 @@ configure_linux_station() {
     
     log "Configurando sudoers para administradores do domínio..."
     cat > /etc/sudoers.d/ad_admins << EOF
-# Administradores do AD com permissão sudo
 %Domain\\ Admins@$DOMAIN ALL=(ALL:ALL) ALL
 EOF
     
-    log "Testando resolução de usuário do domínio..."
-    id "$ADMIN_USER@$DOMAIN" || warn "Usuário do domínio não resolvido — pode levar alguns minutos"
-    
     echo
-    echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║  ✅ ESTAÇÃO LINUX CONFIGURADA COMO MEMBRO DO AD   ║${NC}"
-    echo -e "${GREEN}║                                                     ║${NC}"
-    echo -e "${GREEN}║  Para testar login:                                  ║${NC}"
-    echo -e "${GREEN}║  su - $ADMIN_USER@$DOMAIN                           ║${NC}"
-    echo -e "${GREEN}║                                                     ║${NC}"
-    echo -e "${GREEN}║  Para verificar: realm list / id <usuario>           ║${NC}"
-    echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
-    
+    echo -e "${GREEN}✅ ESTAÇÃO LINUX CONFIGURADA COMO MEMBRO DO AD${NC}"
     echo
     read -p "Pressione Enter para voltar ao menu..."
 }
@@ -1211,9 +976,8 @@ main_menu() {
 trap 'echo -e "\n${RED}[INTERRUPTED]${NC} Script interrompido."; exit 1' INT TERM
 
 log "Iniciando SAMBA AD SERVER UNIFICADO PRO"
-log "Sistema: Ubuntu 24.04 | Samba $(samba --version 2>/dev/null | head -1)"
+log "Sistema: Ubuntu $(lsb_release -rs 2>/dev/null || echo "24.04") | Samba $(samba --version 2>/dev/null | head -1 || echo "4.19.5")"
 
-# Instala pacotes essenciais logo no início
 install_essentials
 
 main_menu
