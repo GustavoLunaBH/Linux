@@ -16,9 +16,43 @@ echo -e "${BLUE}   CONFIGURAÇÃO PÓS-FORMATAÇÃO LINUX  ${NC}"
 echo -e "${BLUE}========================================${NC}"
 
 # ==============================================
+# 0. DEFINIR SENHA DO ROOT (ANTES DE TUDO!)
+# ==============================================
+echo -e "\n${YELLOW}[0/8] DEFININDO SENHA DO ROOT...${NC}"
+echo -e "${RED}⚠️  ATENÇÃO: Defina a senha do root agora para não perder o acesso!${NC}"
+
+# Verifica se o script está sendo executado como root
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}Este script precisa ser executado como root!${NC}"
+    echo -e "${YELLOW}Execute: sudo ./configurar.sh${NC}"
+    exit 1
+fi
+
+# Verifica se o root já tem senha
+ROOT_HAS_PASSWORD=$(grep "^root:" /etc/shadow | cut -d: -f2)
+
+if [ -z "$ROOT_HAS_PASSWORD" ] || [ "$ROOT_HAS_PASSWORD" = "*" ] || [ "$ROOT_HAS_PASSWORD" = "!" ]; then
+    echo -e "${YELLOW}⚠️  Root NÃO tem senha definida!${NC}"
+    echo -e "${YELLOW}Por favor, defina a senha do root agora:${NC}"
+    
+    # Loop até a senha ser definida com sucesso
+    while true; do
+        passwd root
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}✅ Senha do root definida com sucesso!${NC}"
+            break
+        else
+            echo -e "${RED}❌ Falha ao definir senha. Tente novamente.${NC}"
+        fi
+    done
+else
+    echo -e "${GREEN}✅ Root já possui senha definida.${NC}"
+fi
+
+# ==============================================
 # 1. IDENTIFICAR VERSÃO DO LINUX
 # ==============================================
-echo -e "\n${YELLOW}[1/7] IDENTIFICANDO VERSÃO DO LINUX...${NC}"
+echo -e "\n${YELLOW}[1/8] IDENTIFICANDO VERSÃO DO LINUX...${NC}"
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     echo -e "${GREEN}Distribuição: $NAME${NC}"
@@ -31,7 +65,7 @@ fi
 # ==============================================
 # 2. ATUALIZAR O SISTEMA
 # ==============================================
-echo -e "\n${YELLOW}[2/7] ATUALIZANDO REPOSITÓRIOS E PACOTES...${NC}"
+echo -e "\n${YELLOW}[2/8] ATUALIZANDO REPOSITÓRIOS E PACOTES...${NC}"
 
 if command -v apt &> /dev/null; then
     echo -e "${GREEN}Gerenciador APT detectado (Debian/Ubuntu)${NC}"
@@ -58,7 +92,7 @@ fi
 # ==============================================
 # 3. SINCRONIZAR DATA E HORA COM NTP BRASIL
 # ==============================================
-echo -e "\n${YELLOW}[3/7] SINCRONIZANDO DATA E HORA COM NTP.BR...${NC}"
+echo -e "\n${YELLOW}[3/8] SINCRONIZANDO DATA E HORA COM NTP.BR...${NC}"
 
 if command -v timedatectl &> /dev/null; then
     echo -e "${GREEN}Usando timedatectl (systemd)${NC}"
@@ -98,7 +132,7 @@ fi
 # ==============================================
 # 4. IDENTIFICAR IP ATUAL
 # ==============================================
-echo -e "\n${YELLOW}[4/7] IDENTIFICANDO IP ATUAL...${NC}"
+echo -e "\n${YELLOW}[4/8] IDENTIFICANDO IP ATUAL...${NC}"
 
 CURRENT_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n 1)
 if [ -z "$CURRENT_IP" ]; then
@@ -114,7 +148,7 @@ fi
 # ==============================================
 # 5. ATIVAR ROOT NO SSH
 # ==============================================
-echo -e "\n${YELLOW}[5/7] ATIVANDO ACESSO ROOT NO SSH...${NC}"
+echo -e "\n${YELLOW}[5/8] ATIVANDO ACESSO ROOT NO SSH...${NC}"
 
 SSH_CONFIG="/etc/ssh/sshd_config"
 
@@ -140,7 +174,6 @@ if [ -f "$SSH_CONFIG" ]; then
     systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null
     
     echo -e "${GREEN}Acesso root habilitado no SSH!${NC}"
-    echo -e "${YELLOW}⚠️  Defina a senha do root: sudo passwd root${NC}"
 fi
 
 # ==============================================
@@ -195,7 +228,7 @@ converter_mascara_para_cidr() {
 # ==============================================
 # 7. CONFIGURAR IP FIXO (POR ÚLTIMO!)
 # ==============================================
-echo -e "\n${YELLOW}[6/7] CONFIGURANDO IP FIXO...${NC}"
+echo -e "\n${YELLOW}[6/8] CONFIGURANDO IP FIXO...${NC}"
 
 INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n 1)
 if [ -z "$INTERFACE" ]; then
@@ -309,6 +342,47 @@ elif [ -f /etc/network/interfaces ]; then
 fi
 
 # ==============================================
+# 8. VERIFICAR SENHA DO ROOT (CONFIRMAÇÃO FINAL)
+# ==============================================
+echo -e "\n${YELLOW}[7/8] VERIFICANDO SENHA DO ROOT...${NC}"
+
+# Verifica se o root tem senha definida
+ROOT_HAS_PASSWORD=$(grep "^root:" /etc/shadow | cut -d: -f2)
+
+if [ -z "$ROOT_HAS_PASSWORD" ] || [ "$ROOT_HAS_PASSWORD" = "*" ] || [ "$ROOT_HAS_PASSWORD" = "!" ]; then
+    echo -e "${RED}❌ ATENÇÃO: Root NÃO tem senha definida!${NC}"
+    echo -e "${YELLOW}Defina agora para não perder o acesso:${NC}"
+    passwd root
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✅ Senha do root definida com sucesso!${NC}"
+    else
+        echo -e "${RED}❌ Falha crítica! Você pode perder o acesso ao servidor.${NC}"
+        echo -e "${YELLOW}Execute manualmente depois: sudo passwd root${NC}"
+    fi
+else
+    echo -e "${GREEN}✅ Root possui senha definida.${NC}"
+fi
+
+# ==============================================
+# 9. LISTAR ARQUIVOS MODIFICADOS
+# ==============================================
+echo -e "\n${YELLOW}[8/8] RESUMO DOS ARQUIVOS MODIFICADOS...${NC}"
+
+echo -e "${BLUE}Arquivos modificados/backups criados:${NC}"
+if [ -d /etc/netplan ]; then
+    echo -e "  • Netplan: $(ls -la /etc/netplan/*.yaml 2>/dev/null | awk '{print $9}')"
+    echo -e "  • Backups: $(ls -la /etc/netplan/*.backup.* 2>/dev/null | awk '{print $9}')"
+elif [ -f /etc/network/interfaces ]; then
+    echo -e "  • Interfaces: /etc/network/interfaces"
+    echo -e "  • Backups: $(ls -la /etc/network/interfaces.backup.* 2>/dev/null | awk '{print $9}')"
+fi
+
+if [ -f /etc/ssh/sshd_config ]; then
+    echo -e "  • SSH Config: /etc/ssh/sshd_config"
+    echo -e "  • Backups: $(ls -la /etc/ssh/sshd_config.backup.* 2>/dev/null | awk '{print $9}')"
+fi
+
+# ==============================================
 # FINALIZAÇÃO
 # ==============================================
 echo -e "\n${BLUE}========================================${NC}"
@@ -323,6 +397,7 @@ echo -e "  • IP Novo Fixo: $FIXED_IP"
 echo -e "  • Gateway: $GATEWAY"
 echo -e "  • Interface: $INTERFACE"
 echo -e "  • Root SSH: Habilitado"
+echo -e "  • Senha Root: $([ -n "$ROOT_HAS_PASSWORD" ] && [ "$ROOT_HAS_PASSWORD" != "*" ] && [ "$ROOT_HAS_PASSWORD" != "!" ] && echo "✅ Definida" || echo "❌ NÃO DEFINIDA!")"
 
 echo -e "\n${RED}========================================================${NC}"
 echo -e "${RED}⚠️  ATENÇÃO: A CONEXÃO SSH SERÁ PERDIDA AGORA! ⚠️${NC}"
@@ -330,7 +405,9 @@ echo -e "${RED}========================================================${NC}"
 echo -e "${YELLOW}Reconecte-se usando:${NC}"
 echo -e "${BLUE}  ssh root@$FIXED_IP${NC}"
 echo -e "${BLUE}  ssh linux@$FIXED_IP${NC}"
-echo -e "\n${YELLOW}Defina a senha do root:${NC}"
-echo -e "${BLUE}  sudo passwd root${NC}"
-echo -e "\n${BLUE}Recomendação: Reinicie o sistema${NC}"
+
+echo -e "\n${YELLOW}✅ A senha do root já foi definida durante a execução do script.${NC}"
+echo -e "${YELLOW}   Use-a para fazer login como root.${NC}"
+
+echo -e "\n${BLUE}Recomendação: Reinicie o sistema para aplicar todas as mudanças.${NC}"
 echo -e "${BLUE}  sudo reboot${NC}\n"
