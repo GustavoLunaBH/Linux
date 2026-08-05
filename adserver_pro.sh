@@ -665,12 +665,11 @@ EOF
 # ══════════════════════════════════════════════════════════════
 #              FLUXO 3 — CONFIGURAR IP DAS ESTAÇÕES
 # ══════════════════════════════════════════════════════════════
-
 configure_station_ips() {
     clear
-    echo -e "${BLUE}╔══════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║   GERADOR DE CONFIGURAÇÃO DE IP — ESTAÇÕES      ║${NC}"
-    echo -e "${BLUE}╚══════════════════════════════════════════════════╝${NC}"
+    echo -e "${BLUE}╔══════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║   GERADOR DE CONFIGURAÇÃO DE IP — ESTAÇÕES                     ║${NC}"
+    echo -e "${BLUE}╚══════════════════════════════════════════════════════════════════╝${NC}"
     
     echo "Selecione o sistema operacional das estações:"
     echo "  1) Linux (Netplan — Ubuntu/Debian)"
@@ -679,61 +678,251 @@ configure_station_ips() {
     
     case "$OS_OPT" in
         1)
+            # ================================
+            # LINUX — NETPLAN INTELIGENTE
+            # ================================
+            
+            # ① Detectar interface automaticamente
+            log "Detectando interfaces de rede disponíveis..."
+            # Busca interfaces físicas ativas (ignora lo e vnet/virbr)
+            IFS=$'\n'
+            INTERFACES=($(ip link show | 
+                awk '/^[0-9]+: [^ ]+:.*state UP/{gsub(":","",$2); print $2}' | 
+                grep -E "^(en|eth|wl)" || true))
+            
+            if [ ${#INTERFACES[@]} -eq 0 ]; then
+                # Nenhuma UP — pega qualquer física
+                INTERFACES=($(ip link show | 
+                    awk '/^[0-9]+: [^ ]+:/ && !/lo|virbr|vnet/ {gsub(":","",$2); print $2}' | 
+                    grep -E "^(en|eth|wl)" || true))
+            fi
+            
+            if [ ${#INTERFACES[@]} -eq 0 ]; then
+                error "Nenhuma interface de rede encontrada. Conecte o cabo/rede e tente novamente."
+            elif [ ${#INTERFACES[@]} -eq 1 ]; then
+                STA_IFACE="${INTERFACES[0]}"
+                info "Interface detectada automaticamente: $STA_IFACE"
+            else
+                echo
+                echo -e "${YELLOW}Múltiplas interfaces encontradas:${NC}"
+                for i in "${!INTERFACES[@]}"; do
+                    idx=$((i+1))
+                    echo "  [$idx] ${INTERFACES[$i]}"
+                done
+                read -p "Selecione a interface [1-${#INTERFACES[@]}]: " IFACE_SEL
+                STA_IFACE="${INTERFACES[$((IFACE_SEL-1))]}"
+                [ -z "$STA_IFACE" ] && error "Seleção de interface inválida"
+                info "Interface selecionada: $STA_IFACE"
+            fi
+            
+            # ② Detectar arquivo Netplan existente
+            log "Buscando arquivos Netplan em /etc/netplan/..."
+            NETPLAN_FILES=($(find /etc/netplan -maxdepth 1 -name "*.yaml" -type f 2>/dev/null | sort || true))
+            
+            if [ ${#NETPLAN_FILES[@]} -eq 0 ]; then
+                # Nenhum arquivo encontrado — cria um novo
+                NETPLAN_PATH="/etc/netplan/01-ad-static.yaml"
+                warn "Nenhum arquivo Netplan encontrado. Criando $NETPLAN_PATH"
+            elif [ ${#NETPLAN_FILES[@]} -eq 1 ]; then
+                NETPLAN_PATH="${NETPLAN_FILES[0]}"
+                info "Arquivo Netplan encontrado: $NETPLAN_PATH"
+            else
+                # Múltiplos arquivos — pergunta ao usuário
+                echo
+                echo -e "${YELLOW}Múltiplos arquivos Netplan encontrados:${NC}"
+                for i in "${!NETPLAN_FILES[@]}"; do
+                    idx=$((i+1))
+                    echo "  [$idx] ${NETPLAN_FILES[$i]}"
+                done
+                read -p "Selecione o arquivo a editar [1-${#NETPLAN_FILES[@]}]: " FILE_SEL
+                NETPLAN_PATH="${NETPLAN_FILES[$((FILE_SEL-1))]}"
+                [ -z "$NETPLAN_PATH" ] && error "Seleção de arquivo inválida"
+                info "Arquivo selecionado: $NETPLAN_PATH"
+            fi
+            
+            # ③ Perguntar configuração de IP
             echo
-            read -p "IP da estação Linux (ex: 192.168.1.50): " STA_IP
+            read -p "IP estático desejado (ex: 192.168.1.50): " STA_IP
             read -p "Máscara (ex: 24): " STA_MASK
             read -p "Gateway (ex: 192.168.1.1): " STA_GATEWAY
-            read -p "DNS 1 (default: 192.168.1.2): " STA_DNS1
-            STA_DNS1="${STA_DNS1:-192.168.1.2}"
-            read -p "DNS 2 (default: 192.168.1.3): " STA_DNS2
-            STA_DNS2="${STA_DNS2:-192.168.1.3}"
-            read -p "Nome da interface (ex: enp3s0, eth0): " STA_IFACE
             
-            cat > "/root/netplan_station_${STA_IP//./_}.yaml" << EOF
-# Configuração de rede para estação Linux
-# Salve em /etc/netplan/01-netcfg.yaml e execute:
-#   sudo netplan apply
-
+            # DNS flexível — permite qualquer valor
+            echo -n -e "${BLUE}DNS 1 (ex: 8.8.8.8 ou IP do AD): ${NC}"
+            read STA_DNS1
+            [ -z "$STA_DNS1" ] && error "DNS 1 é obrigatório"
+            echo -n -e "${BLUE}DNS 2 (opcional — Enter para pular): ${NC}"
+            read STA_DNS2
+            
+            # ④ Montar nova configuração YAML
+            # Monta a seção de nameservers
+            if [ -n "$STA_DNS2" ]; then
+                NAMESERVERS="      nameservers:\n        addresses: [$STA_DNS1, $STA_DNS2]"
+            else
+                NAMESERVERS="      nameservers:\n        addresses: [$STA_DNS1]"
+            fi
+            
+            # ⑤ Ler arquivo existente e converter de DHCP para estático
+            if [ -f "$NETPLAN_PATH" ]; then
+                # Faz backup antes de editar
+                cp "$NETPLAN_PATH" "$NETPLAN_PATH.bak.$(date +%Y%m%d_%H%M%S)"
+                info "Backup do arquivo original: $NETPLAN_PATH.bak.*"
+                
+                # Verifica se já existe configuração para a interface
+                if grep -q "$STA_IFACE" "$NETPLAN_PATH"; then
+                    info "Interface $STA_IFACE já configurada — convertendo para IP estático"
+                    
+                    # Remove configuração DHCP da interface (caso exista)
+                    sed -i "/^[[:space:]]*${STA_IFACE}:/,/^[[:space:]]*[a-zA-Z]/{
+                        /dhcp4/d
+                        /dhcp6/d
+                    }" "$NETPLAN_PATH"
+                    
+                    # Remove endereços existentes da interface
+                    sed -i "/^[[:space:]]*${STA_IFACE}:/,/^[[:space:]]*[a-zA-Z]/{
+                        /addresses/d
+                        /gateway4/d
+                        /nameservers/d
+                    }" "$NETPLAN_PATH"
+                    
+                    # Se a interface já tem bloco, insere as novas linhas após o nome
+                    # Caso contrário, adiciona o bloco completo
+                    if grep -q "^[[:space:]]*${STA_IFACE}:" "$NETPLAN_PATH"; then
+                        # Já existe o bloco — insere configuração após a linha da interface
+                        awk -v iface="$STA_IFACE" \
+                            -v ip="$STA_IP" \
+                            -v mask="$STA_MASK" \
+                            -v gw="$STA_GATEWAY" \
+                            -v ns="$NAMESERVERS" '
+                        {
+                            print
+                            if (^" *"'iface':"' && !done) {
+                                printf("      addresses: [%s/%s]\n", ip, mask)
+                                printf("      gateway4: %s\n", gw)
+                                printf("%s\n", ns)
+                                done=1
+                            }
+                        }' ip="$STA_IP" mask="$STA_MASK" gw="$STA_GATEWAY" ns="$NAMESERVERS" done=0 \
+                        < "$NETPLAN_PATH" > "$NETPLAN_PATH.tmp" && mv "$NETPLAN_PATH.tmp" "$NETPLAN_PATH"
+                        
+                    else
+                        # Bloco da interface não existe — adiciona no final antes do fechamento
+                        awk '
+                        {
+                            print
+                        }
+                        END {
+                            printf("\n  %s:\n    addresses: [%s/%s]\n    gateway4: %s\n%s\n    dhcp6: no\n    optional: true\n", 
+                                "'"$STA_IFACE"'", "'"$STA_IP"'", "'"$STA_MASK"'", "'"$STA_GATEWAY"'", "'"$NAMESERVERS"'")
+                        }
+                        ' < "$NETPLAN_PATH" > "$NETPLAN_PATH.tmp" && mv "$NETPLAN_PATH.tmp" "$NETPLAN_PATH"
+                    fi
+                    
+                else
+                    # Interface não existe no arquivo — adiciona ao final
+                    info "Adicionando nova interface $STA_IFACE ao arquivo existente"
+                    awk '
+                    {
+                        print
+                    }
+                    END {
+                        printf("\n  %s:\n    addresses: [%s/%s]\n    gateway4: %s\n%s    dhcp6: no\n    optional: true\n", 
+                            "'"$STA_IFACE"'", "'"$STA_IP"'", "'"$STA_MASK"'", "'"$STA_GATEWAY"'", "'"$NAMESERVERS"'")
+                    }
+                    ' < "$NETPLAN_PATH" > "$NETPLAN_PATH.tmp" && mv "$NETPLAN_PATH.tmp" "$NETPLAN_PATH"
+                fi
+                
+            else
+                # Arquivo novo — cria do zero
+                cat > "$NETPLAN_PATH" << EOF
+# Configuração estática gerada pelo adserver_pro.sh
 network:
   version: 2
   ethernets:
     $STA_IFACE:
       addresses: [$STA_IP/$STA_MASK]
       gateway4: $STA_GATEWAY
-      nameservers:
-        addresses: [$STA_DNS1, $STA_DNS2]
-        search: [$(hostname -d 2>/dev/null || echo "rnv.local")]
+$NAMESERVERS
       dhcp6: no
       optional: true
 EOF
+            fi
             
+            # ⑥ Validar e aplicar
+            log "Validando a configuração Netplan..."
+            netplan generate >/dev/null 2>&1 || { warn "netplan generate gerou warnings — verifique $NETPLAN_PATH"; }
+            
+            log "Testando a configuração (netplan try — reverte em 120s se falhar)..."
+            if netplan try >/dev/null 2>&1; then
+                echo -e "${GREEN}✓ Configuração Netplan aplicada com sucesso!${NC}"
+                echo
+                echo -e "${YELLOW}⚠ ATENÇÃO:${NC}"
+                echo "A configuração foi aplicada. Se a conexão de rede cair, o sistema"
+                echo "reverterá automaticamente em 120 segundos. Mantenha este terminal aberto."
+                echo
+                echo -e "${GREEN}Arquivo modificado: $NETPLAN_PATH${NC}"
+                echo
+                # Mostra o diff
+                echo -e "${BLUE}--- Diff (alterações realizadas) ---${NC}"
+                diff -u "$NETPLAN_PATH.bak."* "$NETPLAN_PATH" | grep -E "^[+-][^/-]" || echo "Sem diff visível (arquivo novo)"
+                echo -e "${BLUE}------------------------------------${NC}"
+            else
+                warn "netplan try falhou — revertendo para o backup"
+                cp "$NETPLAN_PATH.bak."* "$NETPLAN_PATH"
+                error "A configuração de rede não foi aplicada. Verifique os valores e tente novamente."
+            fi
+            
+            # ⑦ Gerar script de reversão
+            cat > "/root/reverter_netplan_$(basename "$NETPLAN_PATH").sh" << EOF
+#!/bin/bash
+# Reverte a configuração Netplan para o estado anterior
+cp "$NETPLAN_PATH.bak."* "$NETPLAN_PATH"
+netplan apply
+echo "✅ Revertido para configuração anterior"
+EOF
+            chmod +x "/root/reverter_netplan_$(basename "$NETPLAN_PATH").sh"
             echo
-            echo -e "${GREEN}✓ Arquivo gerado: /root/netplan_station_${STA_IP//./_}.yaml${NC}"
-            echo "Para aplicar:"
-            echo "  sudo cp /root/netplan_station_${STA_IP//./_}.yaml /etc/netplan/01-netcfg.yaml"
-            echo "  sudo netplan apply"
+            echo -e "${YELLOW}Script de reversão gerado: /root/reverter_netplan_$(basename "$NETPLAN_PATH").sh${NC}"
+            echo "Execute para desfazer as alterações se necessário."
+            echo
+            
+            read -p "Pressione Enter para voltar ao menu..."
+            
             ;;
+            
         2)
+            # ================================
+            # WINDOWS — SCRIPT BATCH
+            # (mantém como estava, com pequenas melhorias)
+            # ================================
             echo
             read -p "IP da estação Windows (ex: 192.168.1.51): " STA_IP
             read -p "Máscara (ex: 255.255.255.0): " STA_MASK
             read -p "Gateway (ex: 192.168.1.1): " STA_GATEWAY
-            read -p "DNS 1 (default: 192.168.1.2): " STA_DNS1
-            STA_DNS1="${STA_DNS1:-192.168.1.2}"
-            read -p "DNS 2 (default: 192.168.1.3): " STA_DNS2
-            STA_DNS2="${STA_DNS2:-192.168.1.3}"
+            echo -n -e "${BLUE}DNS 1 (ex: 8.8.8.8 ou IP do AD): ${NC}"
+            read STA_DNS1
+            [ -z "$STA_DNS1" ] && error "DNS 1 é obrigatório"
+            echo -n -e "${BLUE}DNS 2 (opcional — Enter para pular): ${NC}"
+            read STA_DNS2
             read -p "Nome da interface (ex: Ethernet): " STA_IFACE
             
             cat > "/root/config_ip_estacao_${STA_IP}.bat" << EOF
 @echo off
-REM Configuração de IP estático para estação Windows
+REM Configuração de IP estático — gerada pelo adserver_pro.sh
 REM Execute como Administrador
 
-echo Configurando IP estático para a interface "$STA_IFACE"...
+echo.
+echo ⚠ ATENÇÃO: Esta configuração irá substituir o DHCP da interface "$STA_IFACE"
+echo.
+pause
+
+echo Configurando IP estático...
 
 netsh interface ipv4 set address name="$STA_IFACE" source=static address=$STA_IP mask=$STA_MASK gateway=$STA_GATEWAY gwmetric=1
 netsh interface ipv4 set dns name="$STA_IFACE" source=static address=$STA_DNS1 register=primary
-netsh interface ipv4 add dns name="$STA_IFACE" address=$STA_DNS2 index=2
+EOF
+            [ -n "$STA_DNS2" ] && echo "netsh interface ipv4 add dns name=\"$STA_IFACE\" address=$STA_DNS2 index=2" >> "/root/config_ip_estacao_${STA_IP}.bat"
+            
+            cat >> "/root/config_ip_estacao_${STA_IP}.bat" << EOF
 
 echo.
 echo ✅ Configuração aplicada!
@@ -748,14 +937,17 @@ EOF
             echo
             echo -e "${GREEN}✓ Arquivo gerado: /root/config_ip_estacao_${STA_IP}.bat${NC}"
             echo "Copie para a estação Windows e execute como Administrador."
+            echo
+            read -p "Pressione Enter para voltar ao menu..."
             ;;
+            
         *)
             error "Opção inválida"
             ;;
     esac
-    echo
-    read -p "Pressione Enter para voltar ao menu..."
 }
+
+
 
 # ══════════════════════════════════════════════════════════════
 #              FLUXO 4 — LINUX COMO ESTAÇÃO DE TRABALHO
