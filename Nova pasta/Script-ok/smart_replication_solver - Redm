@@ -1,0 +1,39 @@
+COMO USAR O SCRIPT UNIFICADO:
+1. Salvar em AMBOS os servidores:
+bash
+sudo nano /usr/local/bin/smart_replication_solver.sh
+2. Tornar executável em AMBOS:
+bash
+sudo chmod +x /usr/local/bin/smart_replication_solver.sh
+3. Executar NO SERVIDOR QUE ESTIVER COM PROBLEMA:
+bash
+sudo /usr/local/bin/smart_replication_solver.sh
+DECISÃO INTELIGENTE - O QUE O SCRIPT FAZ:
+Cenário	Servidor	Ação
+Tudo funcionando	Qualquer	"Nenhuma ação necessária"
+Primário com problemas	Primário	Corrige DNS, registros, reinicia serviços
+Secundário não está no domínio	Secundário	Rejoin completo do domínio
+Secundário no domínio mas replicação falha	Secundário	Corrige DNS, Kerberos, força replicação
+Secundário parece OK	Secundário	Testa com usuário real
+ONDE EXECUTAR?
+Resposta definitiva:
+bash
+# Se você NÃO SABE qual servidor está com problema:
+# Execute em AMBOS, o script vai diagnosticar e agir conforme necessário
+
+# No servidor primário (adserver01)
+sudo /usr/local/bin/smart_replication_solver.sh
+
+# No servidor secundário (adserver02)
+sudo /usr/local/bin/smart_replication_solver.sh
+O script é inteligente o suficiente para:
+
+✅ Identificar em qual servidor está
+
+✅ Diagnosticar o problema específico
+
+✅ Aplicar a correção correta
+
+✅ Verificar se funcionou
+
+✅ Criar monitoramento automático
