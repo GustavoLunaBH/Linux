@@ -1,0 +1,79 @@
+INSTRUÇÕES DE USO:
+1. Salvar o script em ambos os servidores:
+bash
+# Criar o script
+sudo nano /usr/local/bin/configure_native_replication.sh
+2. Tornar executável:
+bash
+sudo chmod +x /usr/local/bin/configure_native_replication.sh
+3. Executar em AMBOS os servidores:
+No servidor primário (adserver01):
+
+bash
+sudo /usr/local/bin/configure_native_replication.sh
+No servidor secundário (adserver02):
+
+bash
+sudo /usr/local/bin/configure_native_replication.sh
+O QUE O SCRIPT FAZ:
+Etapa	Descrição
+1	Identifica automaticamente se é Primário ou Secundário
+2	Solicita a senha do administrador
+3	Configura /etc/resolv.conf com ambos os DCs
+4	Verifica e corrige DNS
+5	Força replicação inicial em ambas as direções
+6	Testa replicação criando um usuário de teste
+7	Cria script de monitoramento automático
+8	Configura crontab para monitorar a cada 5 minutos
+9	Salva todas as informações de configuração
+RESPOSTA PARA SUA PERGUNTA:
+"Este processo tenho que rodar nos 2 servidores ou só em um?"
+
+RESPOSTA: Deve rodar em AMBOS os servidores!
+
+Motivo:
+Primário: Configura a replicação saindo dele para o secundário
+
+Secundário: Configura a replicação saindo dele para o primário
+
+Isso garante replicação bidirecional completa
+
+Sequência recomendada:
+Primeiro execute no adserver01 (Primário)
+
+Depois execute no adserver02 (Secundário)
+
+VERIFICAR SE FUNCIONOU:
+bash
+# Verificar status da replicação
+samba-tool drs showrepl
+
+# Verificar se ambos os DCs estão no DNS
+host -t SRV _ldap._tcp.RNV.LOCAL
+
+# Testar criando usuário em um servidor
+samba-tool user create teste.novo Senha123! --given-name=Teste --surname=Novo
+
+# Verificar no outro servidor
+samba-tool user list | grep teste.novo
+
+# Verificar logs do monitoramento
+tail -f /var/log/replication_monitor.log
+MONITORAMENTO AUTOMÁTICO:
+O script configura monitoramento automático que:
+
+✅ Verifica a replicação a cada 5 minutos
+
+✅ Tenta corrigir automaticamente se detectar problemas
+
+✅ Força replicação se necessário
+
+✅ Reinicia o serviço se estiver parado
+
+✅ Registra tudo em /var/log/replication_monitor.log
+
+RESUMO:
+Servidor	Precisa executar?	O que configura?
+adserver01 (Primário)	✅ SIM	Replicação Primário → Secundário
+adserver02 (Secundário)	✅ SIM	Replicação Secundário → Primário
+Após executar em ambos, a replicação será 100% automática e bidirecional! 🚀
