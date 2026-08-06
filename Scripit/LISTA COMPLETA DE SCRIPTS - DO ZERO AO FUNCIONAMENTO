@@ -1,0 +1,7 @@
+
+#	Nome do Script	O que faz	Onde executar
+1	01_setup_ad_primary.sh	Configuração COMPLETA do AD Primário	adserver01
+2	02_setup_ad_secondary.sh	Configuração COMPLETA do AD Secundário	adserver02
+3	03_fix_windows_client.sh	Corrige problemas com Windows 7/10/11	AMBOS
+4	04_check_replication.sh	Verifica e corrige replicação	AMBOS
+5	05_firewall_ports.sh	Configura firewall para AD	AMBOS
