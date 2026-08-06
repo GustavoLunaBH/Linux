@@ -58,4 +58,47 @@ CURRENT_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v "12
 
 if [[ "$CURRENT_IP" == "$PRIMARY_IP" ]]; then
     log "Forçando do Primário para o Secundário..."
-    samba-tool drs replicate adserver02 adserver01 "DC=${DOMAIN},DC=INT
+    samba-tool drs replicate adserver02 adserver01 "DC=${DOMAIN},DC=INTRA" -U administrator --password="$ADMIN_PASSWORD" 2>&1
+else
+    log "Forçando do Secundário para o Primário..."
+    samba-tool drs replicate adserver01 adserver02 "DC=${DOMAIN},DC=INTRA" -U administrator --password="$ADMIN_PASSWORD" 2>&1
+fi
+
+success "Replicação forçada"
+
+# ============================================
+# 3. TESTAR COM USUÁRIO
+# ============================================
+echo ""
+log "3. Testando com usuário..."
+
+TEST_USER="test_repl_$(date +%s)"
+
+if samba-tool user create $TEST_USER Test@1234 --given-name="Test" --surname="Replication" -U administrator --password="$ADMIN_PASSWORD" 2>/dev/null; then
+    success "Usuário de teste criado"
+    
+    sleep 10
+    
+    # Verificar no outro servidor
+    if [[ "$CURRENT_IP" == "$PRIMARY_IP" ]]; then
+        if samba-tool user list --host=$SECONDARY_IP -U administrator --password="$ADMIN_PASSWORD" 2>/dev/null | grep -q "$TEST_USER"; then
+            success "✅ REPLICAÇÃO FUNCIONANDO PERFEITAMENTE!"
+        else
+            warning "⚠️ Usuário não replicado"
+        fi
+    else
+        if samba-tool user list --host=$PRIMARY_IP -U administrator --password="$ADMIN_PASSWORD" 2>/dev/null | grep -q "$TEST_USER"; then
+            success "✅ REPLICAÇÃO FUNCIONANDO PERFEITAMENTE!"
+        else
+            warning "⚠️ Usuário não replicado"
+        fi
+    fi
+    
+    # Limpar
+    samba-tool user delete $TEST_USER -U administrator --password="$ADMIN_PASSWORD" 2>/dev/null || true
+else
+    warning "Não foi possível criar usuário de teste"
+fi
+
+echo ""
+echo -e "${GREEN}═══════════════════════════════════════════════════════════════════════════${NC}"
