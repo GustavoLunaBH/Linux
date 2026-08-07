@@ -1,9 +1,7 @@
-# 1. Criar o arquivo manualmente
-cat > configure-netplan.sh << 'EOF'
 #!/bin/bash
 # =============================================================================
 # Script: configure-netplan.sh
-# Versão: 1.3 - COMPLETO E CORRIGIDO
+# Versão: 1.4 - DEFINITIVO
 # Descrição: Configuração de IP via Netplan identificando arquivos existentes
 # =============================================================================
 
@@ -19,6 +17,15 @@ NC='\033[0m'
 NETPLAN_DIR="/etc/netplan"
 BACKUP_DIR="/root/netplan-backup-$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="/root/netplan-config-$(date +%Y%m%d-%H%M%S).log"
+INTERFACE=""
+IP_ADDRESS=""
+NETMASK=""
+GATEWAY=""
+DNS1=""
+DNS2=""
+SEARCH_DOMAIN=""
+NETPLAN_FILE=""
+IS_NEW=""
 
 # =============================================================================
 # FUNÇÕES
@@ -114,6 +121,7 @@ identify_netplan_files() {
 
     log_info "Verificando arquivos Netplan existentes..."
 
+    # Listar arquivos .yaml no diretório
     NETPLAN_FILES=($(ls -1 $NETPLAN_DIR/*.yaml 2>/dev/null | sort))
 
     if [ ${#NETPLAN_FILES[@]} -eq 0 ]; then
@@ -251,37 +259,32 @@ create_netplan_config() {
         log_info "Backup criado: $BACKUP_DIR/$(basename $NETPLAN_FILE)"
     fi
 
-    cat > "$NETPLAN_FILE" << EOF
-# Configuração gerada automaticamente
-# Interface: $INTERFACE
-# Data: $(date)
-network:
-  version: 2
-  ethernets:
-    $INTERFACE:
-      addresses:
-        - $IP_ADDRESS/$NETMASK
-      routes:
-        - to: default
-          via: $GATEWAY
-      nameservers:
-        addresses:
-          - $DNS1
-          - $DNS2
-EOF
-
-    if [[ -n "$SEARCH_DOMAIN" ]]; then
-        cat >> "$NETPLAN_FILE" << EOF
-        search:
-          - $SEARCH_DOMAIN
-EOF
-    fi
-
-    cat >> "$NETPLAN_FILE" << EOF
-      dhcp4: false
-      dhcp6: false
-      optional: false
-EOF
+    # Cria o arquivo YAML
+    {
+        echo "# Configuração gerada automaticamente"
+        echo "# Interface: $INTERFACE"
+        echo "# Data: $(date)"
+        echo "network:"
+        echo "  version: 2"
+        echo "  ethernets:"
+        echo "    $INTERFACE:"
+        echo "      addresses:"
+        echo "        - $IP_ADDRESS/$NETMASK"
+        echo "      routes:"
+        echo "        - to: default"
+        echo "          via: $GATEWAY"
+        echo "      nameservers:"
+        echo "        addresses:"
+        echo "          - $DNS1"
+        echo "          - $DNS2"
+        if [[ -n "$SEARCH_DOMAIN" ]]; then
+            echo "        search:"
+            echo "          - $SEARCH_DOMAIN"
+        fi
+        echo "      dhcp4: false"
+        echo "      dhcp6: false"
+        echo "      optional: false"
+    } > "$NETPLAN_FILE"
 
     chmod 600 "$NETPLAN_FILE"
 
@@ -349,13 +352,16 @@ create_revert_script() {
     if [ -d "$BACKUP_DIR" ] && [ "$(ls -A $BACKUP_DIR)" ]; then
         REVERT_SCRIPT="/root/revert-netplan-$(date +%Y%m%d-%H%M%S).sh"
 
-        cat > "$REVERT_SCRIPT" << 'RVT'
-#!/bin/bash
-echo "Revertendo configuração Netplan..."
-cp -f /root/netplan-backup-*/* /etc/netplan/
-netplan apply
-echo "Configuração revertida!"
-RVT
+        {
+            echo "#!/bin/bash"
+            echo "# Script para reverter configuração Netplan"
+            echo "# Criado em: $(date)"
+            echo ""
+            echo "echo 'Revertendo configuração Netplan...'"
+            echo "cp -f $BACKUP_DIR/* $NETPLAN_DIR/"
+            echo "netplan apply"
+            echo "echo 'Configuração revertida!'"
+        } > "$REVERT_SCRIPT"
 
         chmod +x "$REVERT_SCRIPT"
         log_info "Script de reversão criado: $REVERT_SCRIPT"
@@ -374,16 +380,15 @@ fix_resolv_conf() {
 
     chattr -i /etc/resolv.conf 2>/dev/null
 
-    cat > /etc/resolv.conf << EOF
-# Configurado pelo script configure-netplan.sh
-nameserver $DNS1
-nameserver $DNS2
-EOF
-
-    if [[ -n "$SEARCH_DOMAIN" ]]; then
-        echo "search $SEARCH_DOMAIN" >> /etc/resolv.conf
-        echo "domain $SEARCH_DOMAIN" >> /etc/resolv.conf
-    fi
+    {
+        echo "# Configurado pelo script configure-netplan.sh"
+        echo "nameserver $DNS1"
+        echo "nameserver $DNS2"
+        if [[ -n "$SEARCH_DOMAIN" ]]; then
+            echo "search $SEARCH_DOMAIN"
+            echo "domain $SEARCH_DOMAIN"
+        fi
+    } > /etc/resolv.conf
 
     log_success "resolv.conf atualizado!"
     echo ""
@@ -441,7 +446,7 @@ main() {
     clear
     echo "╔══════════════════════════════════════════════════════════════════╗"
     echo "║     CONFIGURADOR DE REDE - NETPLAN                             ║"
-    echo "║     Versão: 1.3 - COMPLETO                                     ║"
+    echo "║     Versão: 1.4 - DEFINITIVO                                   ║"
     echo "║     Identifica arquivos existentes e evita duplicação          ║"
     echo "╚══════════════════════════════════════════════════════════════════╝"
     echo ""
@@ -491,8 +496,3 @@ main() {
 }
 
 main "$@"
-EOF
-
-# 2. Tornar executável e executar
-chmod +x configure-netplan.sh
-sudo ./configure-netplan.sh
