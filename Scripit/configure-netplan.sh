@@ -1,8 +1,9 @@
+cat > configure-netplan.sh << 'SCRIPT_COMPLETO'
 #!/bin/bash
 # =============================================================================
 # Script: configure-netplan.sh
-# Versão: 2.0 - SIMPLIFICADO
-# Descrição: Configuração de IP via Netplan
+# Versão: 2.0 - DEFINITIVO
+# Descrição: Configuração de IP via Netplan identificando arquivos existentes
 # =============================================================================
 
 # Cores
@@ -38,10 +39,6 @@ print_header() {
 
 pause() { read -p "Pressione ENTER para continuar..."; }
 confirm() { read -p "$1 (s/N): " -n 1 -r; echo; [[ $REPLY =~ ^[Ss]$ ]]; }
-
-# =============================================================================
-# FUNÇÃO: VERIFICAR ROOT
-# =============================================================================
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -92,7 +89,6 @@ identify_netplan_files() {
     echo "----------------------------------------"
     echo ""
     
-    # Verificar se há arquivos
     NETPLAN_FILES=($(ls -1 $NETPLAN_DIR/*.yaml 2>/dev/null | sort))
     
     if [ ${#NETPLAN_FILES[@]} -eq 0 ]; then
@@ -145,7 +141,6 @@ identify_netplan_files() {
 collect_data() {
     print_header "COLETANDO DADOS DE REDE"
     
-    # IP atual
     CURRENT_IP=$(ip -4 addr show "$INTERFACE" 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1)
     CURRENT_GATEWAY=$(ip route | grep default | awk '{print $3}')
     
@@ -188,14 +183,12 @@ collect_data() {
 create_netplan() {
     print_header "CRIANDO ARQUIVO NETPLAN"
     
-    # Backup se existir
     if [ -f "$NETPLAN_FILE" ]; then
         mkdir -p "$BACKUP_DIR"
         cp "$NETPLAN_FILE" "$BACKUP_DIR/"
         log_info "Backup criado: $BACKUP_DIR/$(basename $NETPLAN_FILE)"
     fi
     
-    # Criar o arquivo usando echo (mais confiável)
     echo "# Configuração gerada em $(date)" > "$NETPLAN_FILE"
     echo "# Interface: $INTERFACE" >> "$NETPLAN_FILE"
     echo "network:" >> "$NETPLAN_FILE"
@@ -254,13 +247,11 @@ test_and_apply() {
     log_info "Aplicando..."
     netplan apply
     
-    # Verificar
     NEW_IP=$(ip -4 addr show "$INTERFACE" | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1)
     if [[ "$NEW_IP" == "$IP_ADDRESS" ]]; then
         log_success "IP aplicado: $IP_ADDRESS"
     fi
     
-    # Testar conectividade
     ping -c 3 "$GATEWAY" > /dev/null 2>&1 && log_success "Gateway OK" || log_warning "Gateway falhou"
     ping -c 3 "$DNS1" > /dev/null 2>&1 && log_success "DNS OK" || log_warning "DNS falhou"
 }
@@ -292,7 +283,7 @@ fix_resolv() {
 # =============================================================================
 
 show_summary() {
-    print_header "✅ CONFIGURAÇÃO CONCLUÍDA"
+    print_header "CONFIGURAÇÃO CONCLUÍDA"
     
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════╗"
@@ -309,9 +300,9 @@ show_summary() {
     
     echo ""
     echo "COMANDOS:"
-    echo "  ip a show $INTERFACE  # Verificar IP"
-    echo "  netplan try           # Testar configuração"
-    echo "  netplan apply         # Aplicar configuração"
+    echo "  ip a show $INTERFACE"
+    echo "  netplan try"
+    echo "  netplan apply"
     echo ""
     echo "LOG: $LOG_FILE"
 }
@@ -325,8 +316,8 @@ main() {
     
     clear
     echo "╔══════════════════════════════════════════════════════════════════╗"
-    echo "║     🌐 CONFIGURADOR DE REDE - NETPLAN                          ║"
-    echo "║     Versão: 2.0 - SIMPLIFICADO                                 ║"
+    echo "║     CONFIGURADOR DE REDE - NETPLAN                             ║"
+    echo "║     Versão: 2.0 - DEFINITIVO                                   ║"
     echo "╚══════════════════════════════════════════════════════════════════╝"
     echo ""
     
@@ -354,7 +345,7 @@ main() {
     
     show_summary
     
-    log_success "🎉 CONFIGURAÇÃO CONCLUÍDA!"
+    log_success "CONFIGURAÇÃO CONCLUÍDA!"
     
     if confirm "Deseja reiniciar a rede?"; then
         systemctl restart systemd-networkd
@@ -364,3 +355,7 @@ main() {
 }
 
 main "$@"
+SCRIPT_COMPLETO
+
+chmod +x configure-netplan.sh
+sudo ./configure-netplan.sh
