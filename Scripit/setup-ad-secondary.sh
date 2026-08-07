@@ -1,9 +1,9 @@
 #!/bin/bash
 # =============================================================================
-# Script: setup-ad-secondary-fixed.sh
-# Versão: 1.2 - CORRIGIDO
-# Descrição: Configuração do Controlador Secundário (join no domínio)
-# Uso: sudo ./setup-ad-secondary-fixed.sh
+# Script: setup-ad-secondary.sh
+# Versão: 1.3 - CORRIGIDO (DNS)
+# Descrição: Configuração do Controlador Secundário
+# Uso: sudo ./setup-ad-secondary.sh
 # =============================================================================
 
 # Cores para output
@@ -14,7 +14,6 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
-BOLD='\033[1m'
 
 # Variaveis
 HOSTNAME=""
@@ -180,6 +179,52 @@ collect_user_info() {
 }
 
 # =============================================================================
+# FUNCAO: CONFIGURAR DNS (UMA VEZ SÓ)
+# =============================================================================
+
+configure_dns() {
+    print_header "CONFIGURANDO DNS"
+    
+    log_info "Removendo bloqueio do resolv.conf..."
+    chattr -i /etc/resolv.conf 2>/dev/null
+    
+    log_info "Configurando DNS com servidores publicos..."
+    cat > /etc/resolv.conf << EOF
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+EOF
+    
+    log_info "Testando conectividade com a internet..."
+    
+    # Testar primeiro o ping para IP (não depende de DNS)
+    if ping -c 2 8.8.8.8 > /dev/null 2>&1; then
+        log_success "Internet acessivel (ping 8.8.8.8 OK)"
+    else
+        log_error "Sem acesso a internet! Verifique sua rede."
+        log_info "Gateway: $(ip route | grep default | awk '{print $3}')"
+        exit 1
+    fi
+    
+    log_info "Testando resolucao de DNS..."
+    
+    # Tentar resolver com nslookup
+    if nslookup google.com 8.8.8.8 > /dev/null 2>&1; then
+        log_success "DNS funcionando!"
+    else
+        log_warning "DNS com problemas, mas continuando..."
+        log_info "Tentando ping para google.com..."
+        
+        if ping -c 2 google.com > /dev/null 2>&1; then
+            log_success "DNS funcionando (ping google.com OK)"
+        else
+            log_error "DNS NAO esta funcionando!"
+            log_info "Tente: echo 'nameserver 8.8.8.8' > /etc/resolv.conf"
+            exit 1
+        fi
+    fi
+}
+
+# =============================================================================
 # FUNCAO: VERIFICAR DC1
 # =============================================================================
 
@@ -187,19 +232,11 @@ check_dc1() {
     print_header "VERIFICANDO DC PRIMARIO"
     
     log_info "Testando ping para DC1 ($DC1_IP)..."
-    if ! ping -c 3 $DC1_IP > /dev/null 2>&1; then
+    if ! ping -c 2 $DC1_IP > /dev/null 2>&1; then
         log_error "DC1 nao acessivel!"
         exit 1
     fi
     log_success "DC1 acessivel via ping"
-    
-    log_info "Testando resolucao DNS do DC1..."
-    if host $DC1_FQDN > /dev/null 2>&1; then
-        log_success "DNS do DC1 resolvendo: $DC1_FQDN"
-    else
-        log_warning "DNS do DC1 nao resolvendo, tentando com IP..."
-        echo "$DC1_IP $DC1_FQDN" >> /etc/hosts
-    fi
     
     log_info "Testando portas do AD no DC1..."
     for port in 135 139 389 445 464 636 3268 3269 88; do
@@ -209,46 +246,6 @@ check_dc1() {
             log_warning "Porta $port nao acessivel"
         fi
     done
-    
-    # Testar porta 53 (DNS) separadamente
-    if nc -zu $DC1_IP 53 2>&1 | grep -q "succeeded"; then
-        log_success "Porta 53 (DNS) OK"
-    else
-        log_warning "Porta 53 (DNS) pode estar bloqueada"
-    fi
-}
-
-# =============================================================================
-# FUNCAO: CONFIGURAR DNS
-# =============================================================================
-
-configure_dns() {
-    print_header "CONFIGURANDO DNS"
-    
-    log_info "Configurando DNS para internet..."
-    chattr -i /etc/resolv.conf 2>/dev/null
-    
-    cat > /etc/resolv.conf << EOF
-nameserver 8.8.8.8
-nameserver 1.1.1.1
-nameserver $DC1_IP
-EOF
-    
-    log_info "Testando conectividade..."
-    if ping -c 3 8.8.8.8 > /dev/null 2>&1; then
-        log_success "Internet OK!"
-    else
-        log_error "Sem internet!"
-        exit 1
-    fi
-    
-    log_info "Testando DNS..."
-    if nslookup google.com > /dev/null 2>&1; then
-        log_success "DNS OK!"
-    else
-        log_error "DNS com problemas!"
-        exit 1
-    fi
 }
 
 # =============================================================================
@@ -292,7 +289,7 @@ install_packages() {
         2>&1 | grep -v "debconf"
     
     if command -v samba-tool &> /dev/null; then
-        log_success "Samba instalado: $(samba --version 2>/dev/null | head -1)"
+        log_success "Samba instalado!"
     else
         log_error "Falha na instalacao do Samba!"
         exit 1
@@ -321,6 +318,7 @@ EOF
     cat > /etc/resolv.conf << EOF
 nameserver $DNS_FORWARDER
 nameserver $DC1_IP
+nameserver 8.8.8.8
 search $DOMAIN_NAME
 domain $DOMAIN_NAME
 EOF
@@ -329,7 +327,7 @@ EOF
 }
 
 # =============================================================================
-# FUNCAO: JUNTAR AO DOMINIO (CORRIGIDO)
+# FUNCAO: JUNTAR AO DOMINIO
 # =============================================================================
 
 join_domain() {
@@ -357,18 +355,14 @@ join_domain() {
     fi
     
     log_info "Realizando join no dominio..."
-    log_info "Isso pode levar alguns minutos..."
     
-    # Metodo 1: Usar samba-tool diretamente com pipe (mais confiavel)
-    log_info "Tentando join com samba-tool..."
-    
+    # Usar samba-tool com pipe
     echo "$ADMIN_PASSWORD" | samba-tool domain join $DOMAIN_NAME DC \
         -U administrator \
         --dns-backend=SAMBA_INTERNAL 2>&1 | tee -a "$LOG_FILE"
     
-    # Verificar se funcionou
     if [ -f /var/lib/samba/private/secrets.ldb ]; then
-        log_success "Join no dominio concluido com sucesso!"
+        log_success "Join no dominio concluido!"
         
         if [ -f /var/lib/samba/private/krb5.conf ]; then
             cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
@@ -381,52 +375,7 @@ join_domain() {
         return 0
     fi
     
-    # Se falhou, tentar com expect (metodo 2)
-    log_warning "Primeira tentativa falhou. Tentando com expect..."
-    
-    cat > /tmp/join.exp << 'EOF'
-#!/usr/bin/expect -f
-set timeout 60
-set domain [lindex $argv 0]
-set user [lindex $argv 1]
-set password [lindex $argv 2]
-
-log_user 1
-
-spawn samba-tool domain join $domain DC -U $user --dns-backend=SAMBA_INTERNAL
-
-expect {
-    "Password" {
-        send "$password\r"
-        exp_continue
-    }
-    "ERROR" {
-        puts "ERRO no join"
-        exit 1
-    }
-    eof {
-        puts "Join finalizado"
-    }
-}
-EOF
-    
-    chmod +x /tmp/join.exp
-    /tmp/join.exp "$DOMAIN_NAME" "administrator" "$ADMIN_PASSWORD"
-    rm -f /tmp/join.exp
-    
-    # Verificar novamente
-    if [ -f /var/lib/samba/private/secrets.ldb ]; then
-        log_success "Join no dominio concluido (metodo 2)!"
-        return 0
-    fi
-    
     log_error "Falha no join do dominio!"
-    log_info "Verifique:"
-    log_info "  1. O dominio $DOMAIN_NAME existe"
-    log_info "  2. A senha esta correta"
-    log_info "  3. O DNS esta configurado"
-    log_info "  4. As portas do AD estao acessiveis"
-    
     log_info "Tente manualmente:"
     echo ""
     echo "  samba-tool domain join $DOMAIN_NAME DC -U administrator --dns-backend=SAMBA_INTERNAL"
@@ -471,10 +420,6 @@ check_replication() {
     
     log_info "Status da replicacao:"
     samba-tool drs showrepl 2>/dev/null | head -15
-    
-    log_info "Testando DNS:"
-    host -t A $FQDN 2>/dev/null
-    host -t A $DC1_FQDN 2>/dev/null
 }
 
 # =============================================================================
@@ -495,9 +440,6 @@ samba-tool drs showrepl 2>/dev/null | grep "last success" | head -5
 echo ""
 echo "Dominio:"
 samba-tool domain info 127.0.0.1 2>/dev/null | grep -E "Domain|Forest"
-echo ""
-echo "Usuarios:"
-samba-tool user list 2>/dev/null | head -5
 EOF
     
     chmod +x /root/test-ad.sh
@@ -505,7 +447,7 @@ EOF
 }
 
 # =============================================================================
-# FUNCAO: CONFIGURAR SSH E AUTOCOMPLETE
+# FUNCAO: CONFIGURAR SSH
 # =============================================================================
 
 configure_ssh() {
@@ -513,30 +455,11 @@ configure_ssh() {
     
     sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null
     sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null
-    sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null
     
     grep -q "^PermitRootLogin" /etc/ssh/sshd_config || echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
     
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
     log_success "SSH Root habilitado!"
-}
-
-setup_autocomplete() {
-    print_header "AUTO-COMPLETE"
-    
-    cat > /root/.bashrc << 'EOF'
-bind 'set show-all-if-ambiguous on'
-bind 'set completion-ignore-case on'
-alias ad-status='systemctl status samba-ad-dc'
-alias ad-users='samba-tool user list'
-alias ad-repl='samba-tool drs showrepl'
-alias ad-test='/root/test-ad.sh'
-alias ll='ls -alF'
-alias la='ls -A'
-alias l='ls -CF'
-EOF
-    
-    log_success "Auto-complete configurado!"
 }
 
 # =============================================================================
@@ -556,25 +479,16 @@ show_summary() {
     printf "  %-20s: %-40s\n" "IP" "$IP_ADDRESS"
     printf "  %-20s: %-40s\n" "DC Primario" "$DC1_FQDN ($DC1_IP)"
     printf "  %-20s: %-40s\n" "Usuario" "administrator@$REALM_NAME"
-    echo "---------------------------------------------------------------------"
-    printf "  %-20s: %-40s\n" "Script Teste" "/root/test-ad.sh"
     echo "====================================================================="
     
     echo ""
     echo "====================================================================="
     echo "                    COMANDOS UTEIS"
     echo "====================================================================="
-    echo "  1. Verificar servico:"
-    echo "     systemctl status samba-ad-dc"
-    echo ""
-    echo "  2. Verificar replicacao:"
-    echo "     samba-tool drs showrepl"
-    echo ""
-    echo "  3. Testar autenticacao:"
-    echo "     kinit administrator@$REALM_NAME"
-    echo ""
-    echo "  4. Executar testes:"
-    echo "     /root/test-ad.sh"
+    echo "  1. Verificar servico: systemctl status samba-ad-dc"
+    echo "  2. Verificar replicacao: samba-tool drs showrepl"
+    echo "  3. Testar autenticacao: kinit administrator@$REALM_NAME"
+    echo "  4. Executar testes: /root/test-ad.sh"
     echo "====================================================================="
     
     log_success "DC SECUNDARIO CONFIGURADO!"
@@ -591,7 +505,7 @@ main() {
     echo "====================================================================="
     echo "                                                                     "
     echo "     ACTIVE DIRECTORY - CONTROLADOR SECUNDARIO                      "
-    echo "     Versao: 1.2 - CORRIGIDO                                        "
+    echo "     Versao: 1.3 - CORRIGIDO                                        "
     echo "                                                                     "
     echo "     Join automatico no dominio                                     "
     echo "     SSH Root habilitado                                            "
@@ -599,16 +513,19 @@ main() {
     echo "====================================================================="
     echo ""
     
+    # CONFIGURAR DNS PRIMEIRO (UMA VEZ)
     configure_dns
+    
+    # COLETAR INFORMACOES
     collect_user_info
     
     log_info "Inicio: $(date)"
     log_info "Log: $LOG_FILE"
     echo ""
     
+    # EXECUTAR ETAPAS
     check_dc1
     configure_ssh
-    setup_autocomplete
     configure_hostname
     install_packages
     join_domain
