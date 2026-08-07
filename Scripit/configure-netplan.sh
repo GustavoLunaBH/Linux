@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
-# Script: configure-netplan.sh
-# Versão: 1.0
+# Script: configure-netplan-fixed.sh
+# Versão: 1.1 - CORRIGIDO
 # Descrição: Configuração de IP via Netplan identificando arquivos existentes
 # =============================================================================
 
@@ -49,11 +49,21 @@ print_header() {
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "Este script deve ser executado como root!"
-        echo "Use: sudo ./configure-netplan.sh"
+        echo "Use: sudo ./configure-netplan-fixed.sh"
         exit 1
     fi
 }
 
+# =============================================================================
+# FUNÇÕES CORRIGIDAS - ADICIONADAS
+# =============================================================================
+
+# FUNÇÃO PAUSE - CORRIGIDA
+pause() {
+    read -p "Pressione ENTER para continuar..."
+}
+
+# FUNÇÃO CONFIRM - CORRIGIDA
 confirm() {
     read -p "$1 (s/N): " -n 1 -r
     echo
@@ -65,6 +75,8 @@ confirm() {
 # =============================================================================
 
 identify_interface() {
+    print_header "IDENTIFICANDO INTERFACE DE REDE"
+    
     log_info "Identificando interfaces de rede disponíveis..."
     echo ""
     echo "Interfaces disponíveis:"
@@ -383,7 +395,7 @@ fix_resolv_conf() {
     chattr -i /etc/resolv.conf 2>/dev/null
     
     cat > /etc/resolv.conf << EOF
-# Configurado pelo script configure-netplan.sh
+# Configurado pelo script configure-netplan-fixed.sh
 nameserver $DNS1
 nameserver $DNS2
 EOF
@@ -434,11 +446,8 @@ show_summary() {
     echo "║ 3. Aplicar configuração:                                       ║"
     echo "║    netplan apply                                                ║"
     echo "║                                                                ║"
-    echo "║ 4. Reverter configuração:                                      ║"
-    echo "║    sudo $REVERT_SCRIPT                                         ║"
-    echo "║                                                                ║"
-    echo "║ 5. Ver logs:                                                   ║"
-    echo "║    $LOG_FILE                                                    ║"
+    echo "║ 4. Ver logs:                                                   ║"
+    echo "║    $LOG_FILE                                                    ║
     echo "╚══════════════════════════════════════════════════════════════════╝"
 }
 
@@ -456,7 +465,7 @@ main() {
     echo "║                                                                  ║"
     echo "║     🌐 CONFIGURADOR DE REDE - NETPLAN                           ║"
     echo "║     📦 Ubuntu 24.04.4 LTS                                       ║"
-    echo "║     🔧 Versão: 1.0                                             ║"
+    echo "║     🔧 Versão: 1.1 - CORRIGIDO                                 ║"
     echo "║                                                                  ║"
     echo "║     ✅ Identifica arquivos Netplan existentes                    ║"
     echo "║     ✅ Evita duplicação de arquivos                              ║"
