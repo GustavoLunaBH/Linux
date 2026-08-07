@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
-# Script: configure-netplan-fixed.sh
-# Versão: 1.1 - CORRIGIDO
+# Script: configure-netplan.sh
+# Versão: 1.2 - FINAL CORRIGIDA
 # Descrição: Configuração de IP via Netplan identificando arquivos existentes
 # =============================================================================
 
@@ -49,21 +49,17 @@ print_header() {
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "Este script deve ser executado como root!"
-        echo "Use: sudo ./configure-netplan-fixed.sh"
+        echo "Use: sudo ./configure-netplan.sh"
         exit 1
     fi
 }
 
-# =============================================================================
-# FUNÇÕES CORRIGIDAS - ADICIONADAS
-# =============================================================================
-
-# FUNÇÃO PAUSE - CORRIGIDA
+# FUNÇÃO PAUSE
 pause() {
     read -p "Pressione ENTER para continuar..."
 }
 
-# FUNÇÃO CONFIRM - CORRIGIDA
+# FUNÇÃO CONFIRM
 confirm() {
     read -p "$1 (s/N): " -n 1 -r
     echo
@@ -76,7 +72,7 @@ confirm() {
 
 identify_interface() {
     print_header "IDENTIFICANDO INTERFACE DE REDE"
-    
+
     log_info "Identificando interfaces de rede disponíveis..."
     echo ""
     echo "Interfaces disponíveis:"
@@ -84,7 +80,7 @@ identify_interface() {
     ip -br link | grep -v lo | awk '{print "  " $1 " - " $3}'
     echo "----------------------------------------"
     echo ""
-    
+
     # Interface ativa
     ACTIVE_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
     if [[ -n "$ACTIVE_INTERFACE" ]]; then
@@ -94,16 +90,16 @@ identify_interface() {
         DEFAULT_INTERFACE=$(ip -br link | grep -v lo | awk '{print $1}' | head -n1)
         log_info "Usando interface: $DEFAULT_INTERFACE"
     fi
-    
+
     read -p "Interface de rede (ex: ens33, enp0s3) [$DEFAULT_INTERFACE]: " INTERFACE
     INTERFACE=${INTERFACE:-$DEFAULT_INTERFACE}
-    
+
     # Verificar se a interface existe
     if ! ip link show "$INTERFACE" > /dev/null 2>&1; then
         log_error "Interface $INTERFACE não encontrada!"
         exit 1
     fi
-    
+
     log_success "Interface selecionada: $INTERFACE"
 }
 
@@ -113,12 +109,12 @@ identify_interface() {
 
 identify_netplan_files() {
     print_header "IDENTIFICANDO ARQUIVOS NETPLAN"
-    
+
     log_info "Verificando arquivos Netplan existentes..."
-    
+
     # Listar arquivos .yaml no diretório
     NETPLAN_FILES=($(ls -1 $NETPLAN_DIR/*.yaml 2>/dev/null | sort))
-    
+
     if [ ${#NETPLAN_FILES[@]} -eq 0 ]; then
         log_warning "Nenhum arquivo Netplan encontrado!"
         log_info "Criando novo arquivo: 01-netcfg.yaml"
@@ -126,7 +122,7 @@ identify_netplan_files() {
         IS_NEW=true
         return
     fi
-    
+
     echo ""
     echo "Arquivos Netplan encontrados:"
     echo "----------------------------------------"
@@ -135,7 +131,7 @@ identify_netplan_files() {
     done
     echo "----------------------------------------"
     echo ""
-    
+
     # Perguntar qual arquivo usar
     echo "Opções:"
     echo "  1) Usar arquivo existente (recomendado)"
@@ -143,7 +139,7 @@ identify_netplan_files() {
     echo "  3) Sair e editar manualmente"
     echo ""
     read -p "Escolha uma opção (1-3): " CHOICE
-    
+
     case $CHOICE in
         1)
             # Usar arquivo existente
@@ -154,7 +150,7 @@ identify_netplan_files() {
             echo ""
             read -p "Selecione o arquivo (1-${#NETPLAN_FILES[@]}): " FILE_NUM
             FILE_NUM=$((FILE_NUM-1))
-            
+
             if [[ $FILE_NUM -ge 0 && $FILE_NUM -lt ${#NETPLAN_FILES[@]} ]]; then
                 NETPLAN_FILE="${NETPLAN_FILES[$FILE_NUM]}"
                 IS_NEW=false
@@ -191,26 +187,26 @@ identify_netplan_files() {
 
 collect_network_info() {
     print_header "COLETANDO INFORMAÇÕES DE REDE"
-    
+
     # Obter IP atual
     CURRENT_IP=$(ip -4 addr show "$INTERFACE" 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1)
     CURRENT_GATEWAY=$(ip route | grep default | awk '{print $3}')
     CURRENT_NETMASK=$(ip -4 addr show "$INTERFACE" 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f2 | head -n1)
-    
+
     if [[ -n "$CURRENT_IP" ]]; then
         log_info "Configuração atual:"
         echo "  IP: $CURRENT_IP"
         echo "  Gateway: $CURRENT_GATEWAY"
         echo "  Máscara: /$CURRENT_NETMASK"
         echo ""
-        
+
         if confirm "Manter o IP atual?"; then
             IP_ADDRESS=$CURRENT_IP
             NETMASK=$CURRENT_NETMASK
             GATEWAY=$CURRENT_GATEWAY
         fi
     fi
-    
+
     # Se não manteve ou não tinha IP
     if [[ -z "$IP_ADDRESS" ]]; then
         read -p "Endereço IP (ex: 192.168.1.10): " IP_ADDRESS
@@ -219,12 +215,12 @@ collect_network_info() {
             read -p "Endereço IP (ex: 192.168.1.10): " IP_ADDRESS
         done
     fi
-    
+
     if [[ -z "$NETMASK" ]]; then
         read -p "Máscara de rede (ex: 24): " NETMASK
         NETMASK=${NETMASK:-24}
     fi
-    
+
     if [[ -z "$GATEWAY" ]]; then
         read -p "Gateway (ex: 192.168.1.1): " GATEWAY
         while [[ -z "$GATEWAY" ]]; do
@@ -232,17 +228,17 @@ collect_network_info() {
             read -p "Gateway (ex: 192.168.1.1): " GATEWAY
         done
     fi
-    
+
     # DNS
     read -p "DNS Primário (ex: 8.8.8.8) [8.8.8.8]: " DNS1
     DNS1=${DNS1:-8.8.8.8}
-    
+
     read -p "DNS Secundário (ex: 8.8.4.4) [8.8.4.4]: " DNS2
     DNS2=${DNS2:-8.8.4.4}
-    
+
     # Domínio de pesquisa
     read -p "Domínio de pesquisa (ex: empresa.local): " SEARCH_DOMAIN
-    
+
     log_success "Informações coletadas!"
 }
 
@@ -252,16 +248,16 @@ collect_network_info() {
 
 create_netplan_config() {
     print_header "CRIANDO CONFIGURAÇÃO NETPLAN"
-    
+
     log_info "Criando configuração para interface: $INTERFACE"
-    
+
     # Criar backup do arquivo existente
     if [ -f "$NETPLAN_FILE" ] && [ "$IS_NEW" = false ]; then
         mkdir -p "$BACKUP_DIR"
         cp "$NETPLAN_FILE" "$BACKUP_DIR/"
         log_info "Backup criado: $BACKUP_DIR/$(basename $NETPLAN_FILE)"
     fi
-    
+
     # Construir o conteúdo YAML
     cat > "$NETPLAN_FILE" << EOF
 # Configuração gerada automaticamente
@@ -281,7 +277,7 @@ network:
           - $DNS1
           - $DNS2
 EOF
-    
+
     # Adicionar domínio de pesquisa se fornecido
     if [[ -n "$SEARCH_DOMAIN" ]]; then
         cat >> "$NETPLAN_FILE" << EOF
@@ -289,17 +285,17 @@ EOF
           - $SEARCH_DOMAIN
 EOF
     fi
-    
+
     # Adicionar opções adicionais
     cat >> "$NETPLAN_FILE" << EOF
       dhcp4: false
       dhcp6: false
       optional: false
 EOF
-    
+
     # Definir permissões
     chmod 600 "$NETPLAN_FILE"
-    
+
     log_success "Arquivo criado: $NETPLAN_FILE"
     echo ""
     echo "Conteúdo do arquivo:"
@@ -314,14 +310,14 @@ EOF
 
 test_and_apply() {
     print_header "TESTANDO E APLICANDO CONFIGURAÇÃO"
-    
+
     log_info "Testando configuração Netplan..."
     if netplan try --timeout 10; then
         log_success "✅ Configuração testada e aprovada!"
     else
         log_error "❌ Falha no teste da configuração!"
         log_info "Você pode tentar corrigir manualmente ou reverter o backup."
-        
+
         if confirm "Deseja reverter para a configuração anterior?"; then
             if [ -d "$BACKUP_DIR" ]; then
                 cp "$BACKUP_DIR/"* "$NETPLAN_DIR/"
@@ -331,10 +327,10 @@ test_and_apply() {
         fi
         exit 1
     fi
-    
+
     log_info "Aplicando configuração..."
     netplan apply
-    
+
     # Verificar se o IP foi alterado
     NEW_IP=$(ip -4 addr show "$INTERFACE" | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1)
     if [[ "$NEW_IP" == "$IP_ADDRESS" ]]; then
@@ -342,7 +338,7 @@ test_and_apply() {
     else
         log_warning "⚠️ IP pode não ter sido alterado. Verifique: $NEW_IP"
     fi
-    
+
     # Testar conectividade
     log_info "Testando conectividade..."
     if ping -c 3 "$GATEWAY" > /dev/null 2>&1; then
@@ -350,7 +346,7 @@ test_and_apply() {
     else
         log_warning "⚠️ Gateway não responde: $GATEWAY"
     fi
-    
+
     if ping -c 3 "$DNS1" > /dev/null 2>&1; then
         log_success "✅ DNS acessível: $DNS1"
     else
@@ -365,18 +361,21 @@ test_and_apply() {
 create_revert_script() {
     if [ -d "$BACKUP_DIR" ] && [ "$(ls -A $BACKUP_DIR)" ]; then
         REVERT_SCRIPT="/root/revert-netplan-$(date +%Y%m%d-%H%M%S).sh"
-        
-        cat > "$REVERT_SCRIPT" << EOF
+
+        cat > "$REVERT_SCRIPT" << 'EOF'
 #!/bin/bash
 # Script para reverter configuração Netplan
-# Criado em: $(date)
+# Criado em: DATA
 
 echo "Revertendo configuração Netplan..."
-cp "$BACKUP_DIR/"* "$NETPLAN_DIR/"
+cp -f /root/netplan-backup-*/* /etc/netplan/
 netplan apply
 echo "Configuração revertida!"
 EOF
-        
+
+        # Substituir a data no script
+        sed -i "s/DATA/$(date)/" "$REVERT_SCRIPT"
+
         chmod +x "$REVERT_SCRIPT"
         log_info "Script de reversão criado: $REVERT_SCRIPT"
         log_info "Para reverter: sudo $REVERT_SCRIPT"
@@ -389,22 +388,22 @@ EOF
 
 fix_resolv_conf() {
     print_header "AJUSTANDO RESOLV.CONF"
-    
+
     log_info "Ajustando /etc/resolv.conf..."
-    
+
     chattr -i /etc/resolv.conf 2>/dev/null
-    
+
     cat > /etc/resolv.conf << EOF
-# Configurado pelo script configure-netplan-fixed.sh
+# Configurado pelo script configure-netplan.sh
 nameserver $DNS1
 nameserver $DNS2
 EOF
-    
+
     if [[ -n "$SEARCH_DOMAIN" ]]; then
         echo "search $SEARCH_DOMAIN" >> /etc/resolv.conf
         echo "domain $SEARCH_DOMAIN" >> /etc/resolv.conf
     fi
-    
+
     log_success "resolv.conf atualizado!"
     echo ""
     echo "Conteúdo do resolv.conf:"
@@ -419,7 +418,7 @@ EOF
 
 show_summary() {
     print_header "✅ CONFIGURAÇÃO NETPLAN CONCLUÍDA"
-    
+
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════╗"
     echo "║                    RESUMO DA CONFIGURAÇÃO                      ║"
@@ -432,7 +431,7 @@ show_summary() {
     [[ -n "$SEARCH_DOMAIN" ]] && printf "║ %-20s: %-40s ║\n" "Domínio" "$SEARCH_DOMAIN"
     printf "║ %-20s: %-40s ║\n" "Arquivo" "$(basename $NETPLAN_FILE)"
     echo "╚══════════════════════════════════════════════════════════════════╝"
-    
+
     echo ""
     echo "╔══════════════════════════════════════════════════════════════════╗"
     echo "║                    COMANDOS ÚTEIS                              ║"
@@ -447,7 +446,7 @@ show_summary() {
     echo "║    netplan apply                                                ║"
     echo "║                                                                ║"
     echo "║ 4. Ver logs:                                                   ║"
-    echo "║    $LOG_FILE                                                    ║
+    echo "║    $LOG_FILE                                                    ║"
     echo "╚══════════════════════════════════════════════════════════════════╝"
 }
 
@@ -458,14 +457,14 @@ show_summary() {
 main() {
     # Verificar root
     check_root
-    
+
     # Banner
     clear
     echo "╔══════════════════════════════════════════════════════════════════╗"
     echo "║                                                                  ║"
     echo "║     🌐 CONFIGURADOR DE REDE - NETPLAN                           ║"
     echo "║     📦 Ubuntu 24.04.4 LTS                                       ║"
-    echo "║     🔧 Versão: 1.1 - CORRIGIDO                                 ║"
+    echo "║     🔧 Versão: 1.2 - FINAL                                     ║"
     echo "║                                                                  ║"
     echo "║     ✅ Identifica arquivos Netplan existentes                    ║"
     echo "║     ✅ Evita duplicação de arquivos                              ║"
@@ -474,43 +473,43 @@ main() {
     echo "║                                                                  ║"
     echo "╚══════════════════════════════════════════════════════════════════╝"
     echo ""
-    
+
     log_info "Início: $(date)"
     log_info "Log: $LOG_FILE"
     echo ""
-    
+
     # Executar etapas
     identify_interface
     pause
-    
+
     identify_netplan_files
     pause
-    
+
     collect_network_info
     pause
-    
+
     create_netplan_config
     pause
-    
+
     test_and_apply
     pause
-    
+
     fix_resolv_conf
     pause
-    
+
     create_revert_script
-    
+
     show_summary
-    
+
     log_success "🎉 CONFIGURAÇÃO NETPLAN CONCLUÍDA!"
-    
+
     if confirm "🔄 Deseja reiniciar a rede agora?"; then
         log_info "Reiniciando rede..."
         systemctl restart systemd-networkd
         systemctl restart systemd-resolved
         log_success "Rede reiniciada!"
     fi
-    
+
     if confirm "📋 Deseja mostrar a configuração atual da interface?"; then
         echo ""
         ip a show "$INTERFACE"
