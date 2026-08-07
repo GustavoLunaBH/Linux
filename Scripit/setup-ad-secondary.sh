@@ -1,8 +1,8 @@
 #!/bin/bash
 # =============================================================================
 # Script: setup-ad-secondary.sh
-# Versão: 1.3 - CORRIGIDO (DNS)
-# Descrição: Configuração do Controlador Secundário
+# Versão: 1.4 - CORRIGIDO DEFINITIVO
+# Descrição: Configuração do Controlador Secundário (join no domínio)
 # Uso: sudo ./setup-ad-secondary.sh
 # =============================================================================
 
@@ -15,18 +15,22 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-# Variaveis
-HOSTNAME=""
-DOMAIN_NAME=""
-IP_ADDRESS=""
-DC1_IP=""
-DC1_FQDN=""
-ADMIN_PASSWORD=""
+# =============================================================================
+# CONFIGURACOES FIXAS (ALTERE AQUI SE NECESSARIO)
+# =============================================================================
+
+# Dados do AD (preencher antes de executar)
+HOSTNAME="adserver02"
+DOMAIN_NAME="rnv.intra"
+IP_ADDRESS="192.168.1.3"
+DC1_IP="192.168.1.2"
+DC1_FQDN="adserver01.rnv.intra"
+ADMIN_PASSWORD="Senha@123456"
 DNS_FORWARDER="8.8.8.8"
 
 # Variaveis automaticas
-REALM_NAME=""
-FQDN=""
+REALM_NAME=$(echo "$DOMAIN_NAME" | tr '[:lower:]' '[:upper:]')
+FQDN="${HOSTNAME}.${DOMAIN_NAME}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${SCRIPT_DIR}/setup-ad-secondary-$(date +%Y%m%d-%H%M%S).log"
@@ -66,6 +70,7 @@ print_header() {
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "Este script deve ser executado como root!"
+        echo "Use: sudo ./setup-ad-secondary.sh"
         exit 1
     fi
 }
@@ -77,109 +82,7 @@ confirm() {
 }
 
 # =============================================================================
-# FUNCAO: COLETAR INFORMACOES
-# =============================================================================
-
-collect_user_info() {
-    print_header "INFORMACOES DE CONFIGURACAO"
-    
-    echo "Por favor, informe os dados para o Controlador Secundario:"
-    echo ""
-    
-    while true; do
-        read -p "Nome do Servidor (ex: dc02, adserver02): " HOSTNAME
-        if [[ -n "$HOSTNAME" ]] && [[ "$HOSTNAME" =~ ^[a-zA-Z0-9-]+$ ]]; then
-            break
-        else
-            log_error "Nome invalido!"
-        fi
-    done
-    
-    while true; do
-        read -p "Nome do Dominio (ex: empresa.local): " DOMAIN_NAME
-        if [[ -n "$DOMAIN_NAME" ]] && [[ "$DOMAIN_NAME" =~ ^[a-z0-9]+\.[a-z]+$ ]]; then
-            break
-        else
-            log_error "Dominio invalido!"
-        fi
-    done
-    
-    while true; do
-        read -p "IP do Servidor (ex: 192.168.1.3): " IP_ADDRESS
-        if [[ -n "$IP_ADDRESS" ]] && [[ "$IP_ADDRESS" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            break
-        else
-            log_error "IP invalido!"
-        fi
-    done
-    
-    while true; do
-        read -p "IP do DC Primario (ex: 192.168.1.2): " DC1_IP
-        if [[ -n "$DC1_IP" ]] && [[ "$DC1_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            break
-        else
-            log_error "IP invalido!"
-        fi
-    done
-    
-    while true; do
-        read -p "FQDN do DC Primario (ex: dc01.empresa.local): " DC1_FQDN
-        if [[ -n "$DC1_FQDN" ]] && [[ "$DC1_FQDN" =~ ^[a-zA-Z0-9.-]+$ ]]; then
-            break
-        else
-            log_error "FQDN invalido!"
-        fi
-    done
-    
-    read -p "DNS Forwarder [8.8.8.8]: " DNS_FORWARDER
-    DNS_FORWARDER=${DNS_FORWARDER:-8.8.8.8}
-    
-    REALM_NAME=$(echo "$DOMAIN_NAME" | tr '[:lower:]' '[:upper:]')
-    FQDN="${HOSTNAME}.${DOMAIN_NAME}"
-    
-    echo ""
-    log_info "Configurando senha do ROOT..."
-    passwd root
-    
-    echo ""
-    while true; do
-        read -s -p "Senha do Administrador do AD: " ADMIN_PASSWORD
-        echo ""
-        if [[ ${#ADMIN_PASSWORD} -ge 8 ]]; then
-            read -s -p "Confirme a senha: " ADMIN_PASSWORD_CONFIRM
-            echo ""
-            if [[ "$ADMIN_PASSWORD" == "$ADMIN_PASSWORD_CONFIRM" ]]; then
-                break
-            else
-                log_error "Senhas nao coincidem!"
-            fi
-        else
-            log_error "Senha muito curta! Minimo 8 caracteres."
-        fi
-    done
-    
-    echo ""
-    print_header "RESUMO DA CONFIGURACAO"
-    echo "  --------------------------------------------------------------"
-    printf "  %-22s: %-40s\n" "Tipo" "Controlador Secundario"
-    printf "  %-22s: %-40s\n" "Servidor" "$HOSTNAME"
-    printf "  %-22s: %-40s\n" "Dominio" "$DOMAIN_NAME"
-    printf "  %-22s: %-40s\n" "Realm" "$REALM_NAME"
-    printf "  %-22s: %-40s\n" "FQDN" "$FQDN"
-    printf "  %-22s: %-40s\n" "IP" "$IP_ADDRESS"
-    printf "  %-22s: %-40s\n" "IP DC Primario" "$DC1_IP"
-    printf "  %-22s: %-40s\n" "FQDN DC Primario" "$DC1_FQDN"
-    echo "  --------------------------------------------------------------"
-    echo ""
-    
-    if ! confirm "Confirmar e iniciar configuracao?"; then
-        log_info "Configuracao cancelada."
-        exit 0
-    fi
-}
-
-# =============================================================================
-# FUNCAO: CONFIGURAR DNS (UMA VEZ SÓ)
+# FUNCAO: CONFIGURAR DNS
 # =============================================================================
 
 configure_dns() {
@@ -188,57 +91,78 @@ configure_dns() {
     log_info "Removendo bloqueio do resolv.conf..."
     chattr -i /etc/resolv.conf 2>/dev/null
     
-    log_info "Configurando DNS com servidores publicos..."
+    log_info "Configurando DNS..."
     cat > /etc/resolv.conf << EOF
 nameserver 8.8.8.8
 nameserver 1.1.1.1
+nameserver $DC1_IP
+search $DOMAIN_NAME
+domain $DOMAIN_NAME
 EOF
     
-    log_info "Testando conectividade com a internet..."
-    
-    # Testar primeiro o ping para IP (não depende de DNS)
+    log_info "Testando conectividade..."
     if ping -c 2 8.8.8.8 > /dev/null 2>&1; then
-        log_success "Internet acessivel (ping 8.8.8.8 OK)"
+        log_success "Internet OK!"
     else
-        log_error "Sem acesso a internet! Verifique sua rede."
-        log_info "Gateway: $(ip route | grep default | awk '{print $3}')"
+        log_error "Sem internet!"
         exit 1
     fi
     
-    log_info "Testando resolucao de DNS..."
-    
-    # Tentar resolver com nslookup
-    if nslookup google.com 8.8.8.8 > /dev/null 2>&1; then
-        log_success "DNS funcionando!"
+    log_info "Testando DNS..."
+    if nslookup google.com > /dev/null 2>&1; then
+        log_success "DNS OK!"
     else
         log_warning "DNS com problemas, mas continuando..."
-        log_info "Tentando ping para google.com..."
-        
-        if ping -c 2 google.com > /dev/null 2>&1; then
-            log_success "DNS funcionando (ping google.com OK)"
-        else
-            log_error "DNS NAO esta funcionando!"
-            log_info "Tente: echo 'nameserver 8.8.8.8' > /etc/resolv.conf"
-            exit 1
-        fi
     fi
 }
 
 # =============================================================================
-# FUNCAO: VERIFICAR DC1
+# FUNCAO: CONFIGURAR HOSTNAME E HOSTS
+# =============================================================================
+
+configure_hostname() {
+    print_header "CONFIGURANDO HOSTNAME"
+    
+    log_info "Hostname: $FQDN"
+    hostnamectl set-hostname "$FQDN" 2>/dev/null
+    echo "$FQDN" > /etc/hostname
+    
+    log_info "Configurando /etc/hosts..."
+    cat > /etc/hosts << EOF
+127.0.0.1       localhost
+127.0.1.1       $FQDN $HOSTNAME
+$IP_ADDRESS     $FQDN $HOSTNAME
+$DC1_IP         $DC1_FQDN
+EOF
+    
+    log_success "Hostname configurado!"
+}
+
+# =============================================================================
+# FUNCAO: VERIFICAR DC PRIMARIO
 # =============================================================================
 
 check_dc1() {
     print_header "VERIFICANDO DC PRIMARIO"
     
-    log_info "Testando ping para DC1 ($DC1_IP)..."
+    log_info "DC Primario: $DC1_FQDN ($DC1_IP)"
+    
+    log_info "Testando ping..."
     if ! ping -c 2 $DC1_IP > /dev/null 2>&1; then
         log_error "DC1 nao acessivel!"
         exit 1
     fi
-    log_success "DC1 acessivel via ping"
+    log_success "DC1 acessivel"
     
-    log_info "Testando portas do AD no DC1..."
+    log_info "Testando resolucao DNS do DC1..."
+    if host $DC1_FQDN > /dev/null 2>&1; then
+        log_success "DNS do DC1 OK"
+    else
+        log_warning "DNS do DC1 nao resolve, adicionando ao hosts..."
+        echo "$DC1_IP $DC1_FQDN" >> /etc/hosts
+    fi
+    
+    log_info "Testando portas do AD..."
     for port in 135 139 389 445 464 636 3268 3269 88; do
         if nc -zv $DC1_IP $port 2>&1 | grep -q "succeeded"; then
             log_success "Porta $port OK"
@@ -290,6 +214,7 @@ install_packages() {
     
     if command -v samba-tool &> /dev/null; then
         log_success "Samba instalado!"
+        log_info "Versao: $(samba --version 2>/dev/null | head -1)"
     else
         log_error "Falha na instalacao do Samba!"
         exit 1
@@ -297,37 +222,7 @@ install_packages() {
 }
 
 # =============================================================================
-# FUNCAO: CONFIGURAR HOSTNAME
-# =============================================================================
-
-configure_hostname() {
-    print_header "CONFIGURANDO HOSTNAME"
-    
-    log_info "Hostname: $FQDN"
-    hostnamectl set-hostname "$FQDN" 2>/dev/null
-    echo "$FQDN" > /etc/hostname
-    
-    cat > /etc/hosts << EOF
-127.0.0.1       localhost
-127.0.1.1       $FQDN $HOSTNAME
-$IP_ADDRESS     $FQDN $HOSTNAME
-$DC1_IP         $DC1_FQDN
-EOF
-    
-    chattr -i /etc/resolv.conf 2>/dev/null
-    cat > /etc/resolv.conf << EOF
-nameserver $DNS_FORWARDER
-nameserver $DC1_IP
-nameserver 8.8.8.8
-search $DOMAIN_NAME
-domain $DOMAIN_NAME
-EOF
-    
-    log_success "Hostname configurado!"
-}
-
-# =============================================================================
-# FUNCAO: JUNTAR AO DOMINIO
+# FUNCAO: JOIN NO DOMINIO (CORRIGIDO)
 # =============================================================================
 
 join_domain() {
@@ -335,6 +230,7 @@ join_domain() {
     
     log_info "Dominio: $DOMAIN_NAME"
     log_info "DC Primario: $DC1_FQDN ($DC1_IP)"
+    log_info "Senha: ********"
     
     log_info "Parando servicos conflitantes..."
     systemctl stop smbd nmbd winbind 2>/dev/null
@@ -355,14 +251,16 @@ join_domain() {
     fi
     
     log_info "Realizando join no dominio..."
+    log_info "Isso pode levar alguns segundos..."
     
-    # Usar samba-tool com pipe
+    # Metodo 1: Join com pipe (mais confiavel)
     echo "$ADMIN_PASSWORD" | samba-tool domain join $DOMAIN_NAME DC \
         -U administrator \
         --dns-backend=SAMBA_INTERNAL 2>&1 | tee -a "$LOG_FILE"
     
+    # Verificar se funcionou
     if [ -f /var/lib/samba/private/secrets.ldb ]; then
-        log_success "Join no dominio concluido!"
+        log_success "Join no dominio concluido com sucesso!"
         
         if [ -f /var/lib/samba/private/krb5.conf ]; then
             cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
@@ -372,6 +270,45 @@ join_domain() {
             --principal=administrator@"$REALM_NAME" 2>/dev/null
         chmod 600 /root/adadmin.keytab 2>/dev/null
         
+        return 0
+    fi
+    
+    # Metodo 2: Tentar com expect se falhou
+    log_warning "Primeira tentativa falhou. Tentando com expect..."
+    
+    cat > /tmp/join.exp << 'EOF'
+#!/usr/bin/expect -f
+set timeout 60
+set domain [lindex $argv 0]
+set user [lindex $argv 1]
+set password [lindex $argv 2]
+
+log_user 1
+
+spawn samba-tool domain join $domain DC -U $user --dns-backend=SAMBA_INTERNAL
+
+expect {
+    "Password" {
+        send "$password\r"
+        exp_continue
+    }
+    "ERROR" {
+        puts "ERRO no join"
+        exit 1
+    }
+    eof {
+        puts "Join finalizado"
+    }
+}
+EOF
+    
+    chmod +x /tmp/join.exp
+    /tmp/join.exp "$DOMAIN_NAME" "administrator" "$ADMIN_PASSWORD"
+    rm -f /tmp/join.exp
+    
+    # Verificar novamente
+    if [ -f /var/lib/samba/private/secrets.ldb ]; then
+        log_success "Join no dominio concluido (metodo 2)!"
         return 0
     fi
     
@@ -401,6 +338,9 @@ start_services() {
     
     if systemctl is-active --quiet samba-ad-dc; then
         log_success "Samba AD DC rodando!"
+        
+        log_info "Portas abertas:"
+        ss -tulpn 2>/dev/null | grep -E ":(135|139|389|445|464|636|3268|3269|88)\s" | grep LISTEN || log_warning "Nenhuma porta AD encontrada"
     else
         log_error "Falha ao iniciar samba-ad-dc!"
         systemctl status samba-ad-dc --no-pager
@@ -418,32 +358,85 @@ check_replication() {
     log_info "Autenticando..."
     echo "$ADMIN_PASSWORD" | kinit administrator@"$REALM_NAME" 2>/dev/null
     
+    if [ $? -eq 0 ]; then
+        log_success "Autenticacao OK!"
+    else
+        log_warning "Falha na autenticacao"
+    fi
+    
     log_info "Status da replicacao:"
-    samba-tool drs showrepl 2>/dev/null | head -15
+    echo ""
+    samba-tool drs showrepl 2>/dev/null | head -20
+    echo ""
+    
+    log_info "Testando DNS:"
+    host -t A $FQDN 2>/dev/null || log_warning "DNS do $FQDN nao resolve"
+    host -t A $DC1_FQDN 2>/dev/null || log_warning "DNS do $DC1_FQDN nao resolve"
 }
 
 # =============================================================================
-# FUNCAO: SCRIPTS AUXILIARES
+# FUNCAO: CRIAR SCRIPTS AUXILIARES
 # =============================================================================
 
 create_scripts() {
-    print_header "CRIANDO SCRIPTS"
+    print_header "CRIANDO SCRIPTS AUXILIARES"
     
+    # Script de teste
     cat > /root/test-ad.sh << EOF
 #!/bin/bash
 echo "=== TESTE DO AD (SECUNDARIO) ==="
 echo ""
+
+echo "1. SERVICO:"
 systemctl status samba-ad-dc --no-pager | grep Active
 echo ""
-echo "Replicacao:"
+
+echo "2. REPLICACAO:"
 samba-tool drs showrepl 2>/dev/null | grep "last success" | head -5
 echo ""
-echo "Dominio:"
+
+echo "3. DOMINIO:"
 samba-tool domain info 127.0.0.1 2>/dev/null | grep -E "Domain|Forest"
+echo ""
+
+echo "4. USUARIOS (primeiros 5):"
+samba-tool user list 2>/dev/null | head -5
+echo ""
+
+echo "5. DNS:"
+host $FQDN 2>/dev/null || echo "   Nao resolveu"
+host $DC1_FQDN 2>/dev/null || echo "   Nao resolveu"
+echo ""
+
+echo "=== FIM DOS TESTES ==="
 EOF
     
     chmod +x /root/test-ad.sh
-    log_success "Scripts criados!"
+    
+    # Script de backup
+    mkdir -p /backup/ad 2>/dev/null
+    
+    cat > /usr/local/bin/backup-ad.sh << 'EOF'
+#!/bin/bash
+BACKUP_DIR="/backup/ad"
+DATE=$(date +%Y%m%d_%H%M%S)
+LOG_FILE="/var/log/backup-ad.log"
+
+mkdir -p $BACKUP_DIR
+echo "=== Backup AD - $DATE ===" >> $LOG_FILE
+
+samba-tool domain backup online --targetdir=$BACKUP_DIR --backup-file="ad_backup_$DATE.bak" 2>&1 >> $LOG_FILE
+tar -czf $BACKUP_DIR/sysvol_$DATE.tar.gz -C /var/lib/samba sysvol 2>&1 >> $LOG_FILE
+
+find $BACKUP_DIR -name "*.bak" -mtime +30 -delete 2>/dev/null
+find $BACKUP_DIR -name "*.tar.gz" -mtime +30 -delete 2>/dev/null
+
+echo "Backup concluido" >> $LOG_FILE
+EOF
+    
+    chmod +x /usr/local/bin/backup-ad.sh
+    
+    log_success "Scripts auxiliares criados!"
 }
 
 # =============================================================================
@@ -453,13 +446,52 @@ EOF
 configure_ssh() {
     print_header "CONFIGURANDO SSH"
     
+    log_info "Habilitando Root via SSH..."
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak 2>/dev/null
+    
     sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null
     sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null
+    sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null
     
     grep -q "^PermitRootLogin" /etc/ssh/sshd_config || echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+    grep -q "^PasswordAuthentication" /etc/ssh/sshd_config || echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
     
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
-    log_success "SSH Root habilitado!"
+    
+    log_success "Root habilitado via SSH!"
+}
+
+# =============================================================================
+# FUNCAO: CONFIGURAR AUTO-COMPLETE
+# =============================================================================
+
+setup_autocomplete() {
+    print_header "CONFIGURANDO AUTO-COMPLETE"
+    
+    cat > /root/.bashrc << 'EOF'
+# Auto-complete
+bind 'set show-all-if-ambiguous on'
+bind 'set completion-ignore-case on'
+export HISTTIMEFORMAT="%F %T "
+
+# Aliases
+alias ad-status='systemctl status samba-ad-dc'
+alias ad-users='samba-tool user list'
+alias ad-groups='samba-tool group list'
+alias ad-repl='samba-tool drs showrepl'
+alias ad-test='/root/test-ad.sh'
+alias ad-backup='/usr/local/bin/backup-ad.sh'
+alias ad-logs='tail -f /var/log/samba/log.samba'
+alias ad-ports='ss -tulpn | grep -E "135|139|389|445|464|636|3268|3269|88"'
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+alias update='apt update && apt upgrade -y'
+alias install='apt install -y'
+alias clean='apt autoremove -y && apt autoclean'
+EOF
+    
+    log_success "Auto-complete configurado!"
 }
 
 # =============================================================================
@@ -479,16 +511,30 @@ show_summary() {
     printf "  %-20s: %-40s\n" "IP" "$IP_ADDRESS"
     printf "  %-20s: %-40s\n" "DC Primario" "$DC1_FQDN ($DC1_IP)"
     printf "  %-20s: %-40s\n" "Usuario" "administrator@$REALM_NAME"
+    printf "  %-20s: %-40s\n" "Senha AD" "$ADMIN_PASSWORD"
+    echo "---------------------------------------------------------------------"
+    printf "  %-20s: %-40s\n" "Script Teste" "/root/test-ad.sh"
+    printf "  %-20s: %-40s\n" "Script Backup" "/usr/local/bin/backup-ad.sh"
     echo "====================================================================="
     
     echo ""
     echo "====================================================================="
     echo "                    COMANDOS UTEIS"
     echo "====================================================================="
-    echo "  1. Verificar servico: systemctl status samba-ad-dc"
-    echo "  2. Verificar replicacao: samba-tool drs showrepl"
-    echo "  3. Testar autenticacao: kinit administrator@$REALM_NAME"
-    echo "  4. Executar testes: /root/test-ad.sh"
+    echo "  1. Verificar servico:"
+    echo "     systemctl status samba-ad-dc"
+    echo ""
+    echo "  2. Verificar replicacao:"
+    echo "     samba-tool drs showrepl"
+    echo ""
+    echo "  3. Executar testes:"
+    echo "     /root/test-ad.sh"
+    echo ""
+    echo "  4. Testar autenticacao:"
+    echo "     kinit administrator@$REALM_NAME"
+    echo ""
+    echo "  5. Forcar replicacao:"
+    echo "     samba-tool drs replicate $FQDN $DC1_FQDN dc=$DOMAIN_NAME"
     echo "====================================================================="
     
     log_success "DC SECUNDARIO CONFIGURADO!"
@@ -505,7 +551,7 @@ main() {
     echo "====================================================================="
     echo "                                                                     "
     echo "     ACTIVE DIRECTORY - CONTROLADOR SECUNDARIO                      "
-    echo "     Versao: 1.3 - CORRIGIDO                                        "
+    echo "     Versao: 1.4 - CORRIGIDO DEFINITIVO                             "
     echo "                                                                     "
     echo "     Join automatico no dominio                                     "
     echo "     SSH Root habilitado                                            "
@@ -513,20 +559,30 @@ main() {
     echo "====================================================================="
     echo ""
     
-    # CONFIGURAR DNS PRIMEIRO (UMA VEZ)
-    configure_dns
+    # MOSTRAR CONFIGURACOES
+    echo "CONFIGURACOES:"
+    echo "  Servidor: $HOSTNAME"
+    echo "  Dominio: $DOMAIN_NAME"
+    echo "  IP: $IP_ADDRESS"
+    echo "  DC Primario: $DC1_FQDN ($DC1_IP)"
+    echo "  Senha AD: ********"
+    echo ""
     
-    # COLETAR INFORMACOES
-    collect_user_info
+    if ! confirm "Confirmar e iniciar configuracao?"; then
+        log_info "Configuracao cancelada."
+        exit 0
+    fi
     
     log_info "Inicio: $(date)"
     log_info "Log: $LOG_FILE"
     echo ""
     
     # EXECUTAR ETAPAS
-    check_dc1
+    configure_dns
     configure_ssh
+    setup_autocomplete
     configure_hostname
+    check_dc1
     install_packages
     join_domain
     start_services
@@ -536,10 +592,11 @@ main() {
     show_summary
     
     if confirm "Reiniciar o servidor agora?"; then
-        log_info "Reiniciando..."
+        log_info "Reiniciando em 5 segundos..."
         sleep 5
         reboot
     else
+        log_info "Lembre-se de reiniciar o servidor depois."
         log_info "Execute: reboot"
     fi
 }
