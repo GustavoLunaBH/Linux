@@ -1,8 +1,8 @@
 #!/bin/bash
 # =============================================================================
 # Script: setup-ad-primary.sh
-# Versão: 8.0 - INSTALAÇÃO DO CONTROLADOR PRIMÁRIO
-# Descrição: Configuração completa do primeiro DC do domínio
+# Versão: 8.1 - CORRIGIDO
+# Descrição: Configuração do primeiro DC do domínio
 # Uso: sudo ./setup-ad-primary.sh
 # =============================================================================
 
@@ -29,7 +29,6 @@ DNS_FORWARDER="8.8.8.8"
 # Variáveis do script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${SCRIPT_DIR}/setup-ad-primary-$(date +%Y%m%d-%H%M%S).log"
-BACKUP_DIR="/root/ad-backup-$(date +%Y%m%d-%H%M%S)"
 
 # =============================================================================
 # FUNÇÕES DE UTILIDADE
@@ -72,6 +71,7 @@ check_root() {
 }
 
 pause() {
+    echo ""
     read -p "Pressione ENTER para continuar..."
 }
 
@@ -89,12 +89,12 @@ configure_language() {
     print_header "🌐 CONFIGURANDO IDIOMA PARA PORTUGUÊS"
     
     log_info "Instalando pacotes de idioma..."
-    apt update 2>/dev/null
-    apt install -y language-pack-pt language-pack-pt-base 2>/dev/null
+    apt update -qq 2>/dev/null
+    apt install -y language-pack-pt language-pack-pt-base 2>/dev/null || log_warning "Pacotes de idioma não encontrados"
     
     log_info "Configurando locale..."
     locale-gen pt_BR.UTF-8 2>/dev/null
-    update-locale LANG=pt_BR.UTF-8 LANGUAGE=pt_BR:pt LC_ALL=pt_BR.UTF-8
+    update-locale LANG=pt_BR.UTF-8 LANGUAGE=pt_BR:pt LC_ALL=pt_BR.UTF-8 2>/dev/null
     
     cat > /etc/default/locale << 'EOF'
 LANG=pt_BR.UTF-8
@@ -114,8 +114,7 @@ LC_MEASUREMENT=pt_BR.UTF-8
 LC_IDENTIFICATION=pt_BR.UTF-8
 EOF
     
-    timedatectl set-timezone America/Sao_Paulo
-    apt install -y fonts-liberation fonts-dejavu-core 2>/dev/null
+    timedatectl set-timezone America/Sao_Paulo 2>/dev/null
     
     log_success "Idioma configurado para Português do Brasil!"
 }
@@ -135,10 +134,13 @@ configure_ssh_root() {
     log_info "Configurando SSH para permitir login root..."
     cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak 2>/dev/null
     
+    # Permitir login root
     sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null
     sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null
     sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null
+    sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null
     
+    # Adicionar se não existir
     grep -q "^PermitRootLogin" /etc/ssh/sshd_config || echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
     grep -q "^PasswordAuthentication" /etc/ssh/sshd_config || echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
     
@@ -155,7 +157,7 @@ configure_ssh_root() {
 setup_autocomplete() {
     print_header "⌨️  CONFIGURANDO AUTO-COMPLETE COM TAB"
     
-    log_info "Habilitando auto-complete e melhorias do terminal..."
+    log_info "Habilitando auto-complete..."
     
     cat > /etc/inputrc << 'EOF'
 set show-all-if-ambiguous on
@@ -164,7 +166,6 @@ set colored-stats on
 set menu-complete-display-prefix on
 set bell-style none
 set editing-mode emacs
-set keymap emacs
 "\e[Z": menu-complete
 EOF
     
@@ -193,14 +194,12 @@ bind 'set colored-stats on'
 alias ad-status='systemctl status samba-ad-dc'
 alias ad-users='samba-tool user list'
 alias ad-groups='samba-tool group list'
-alias ad-test='kinit administrator@'
 alias ad-backup='/usr/local/bin/backup-ad.sh'
 alias ad-logs='tail -f /var/log/samba/log.samba'
 alias ad-test-all='/root/test-ad.sh'
 alias ad-ports='ss -tulpn | grep -E "135|139|389|445|464|636|3268|3269|88|53"'
 alias ad-info='samba-tool domain info 127.0.0.1'
 alias ad-health='samba-tool domain health'
-alias ad-repl='samba-tool drs showrepl'
 alias update='apt update && apt upgrade -y'
 alias install='apt install -y'
 alias clean='apt autoremove -y && apt autoclean'
@@ -327,10 +326,10 @@ collect_user_info() {
 # =============================================================================
 
 configure_hostname_dns() {
-    print_header "CONFIGURAÇÃO DE HOSTNAME E DNS"
+    print_header "🏷️  CONFIGURAÇÃO DE HOSTNAME E DNS"
     
     log_info "Configurando hostname para: $FQDN"
-    hostnamectl set-hostname "$FQDN"
+    hostnamectl set-hostname "$FQDN" 2>/dev/null
     
     log_info "Configurando /etc/hosts"
     cat > /etc/hosts << EOF
@@ -362,33 +361,71 @@ EOF
 # =============================================================================
 
 install_packages() {
-    print_header "INSTALAÇÃO DE PACOTES"
+    print_header "📦 INSTALAÇÃO DE PACOTES"
     
     log_info "Atualizando repositórios..."
-    apt update 2>/dev/null
+    apt update -qq 2>/dev/null
     
     log_info "Instalando pacotes essenciais..."
     
+    # Instalar pacotes básicos primeiro
+    apt install -y wget curl gnupg2 software-properties-common 2>/dev/null
+    
     PACKAGES=(
-        samba smbclient cifs-utils krb5-user krb5-config winbind
-        libpam-winbind libnss-winbind acl attr bind9utils dnsutils
-        samba-ad-dc samba-dsdb-modules python3 python3-dnspython
-        python3-ldb python3-samba ldb-tools net-tools ldap-utils
-        expect chrony ntpdate fail2ban whois
-        language-pack-pt language-pack-pt-base
-        fonts-liberation fonts-dejavu-core
+        samba
+        smbclient
+        cifs-utils
+        krb5-user
+        krb5-config
+        winbind
+        libpam-winbind
+        libnss-winbind
+        acl
+        attr
+        bind9utils
+        dnsutils
+        samba-ad-dc
+        samba-dsdb-modules
+        python3
+        python3-dnspython
+        python3-ldb
+        python3-samba
+        ldb-tools
+        net-tools
+        ldap-utils
+        expect
+        chrony
+        ntpdate
+        fail2ban
+        whois
+        language-pack-pt
+        language-pack-pt-base
+        fonts-liberation
+        fonts-dejavu-core
+        bash-completion
     )
     
     for pkg in "${PACKAGES[@]}"; do
         log_info "Instalando $pkg..."
-        apt install -y $pkg 2>/dev/null || log_warning "Falha ao instalar $pkg (não crítico)"
+        apt install -y $pkg 2>/dev/null
+        if [ $? -eq 0 ]; then
+            log_success "✅ $pkg instalado"
+        else
+            log_warning "⚠️ Falha ao instalar $pkg (pode ser ignorado)"
+        fi
     done
     
+    # Verificar se o Samba foi instalado
     if command -v samba-tool &> /dev/null; then
-        log_success "Samba instalado: $(samba --version)"
+        log_success "Samba instalado: $(samba --version 2>/dev/null)"
     else
         log_error "Falha na instalação do Samba!"
-        exit 1
+        log_info "Tentando instalar novamente..."
+        apt install -y samba samba-ad-dc samba-dsdb-modules 2>/dev/null
+        if ! command -v samba-tool &> /dev/null; then
+            log_error "Samba não instalado. Abortando."
+            exit 1
+        fi
     fi
     
     systemctl enable fail2ban 2>/dev/null
@@ -402,7 +439,7 @@ install_packages() {
 # =============================================================================
 
 configure_kerberos() {
-    print_header "CONFIGURAÇÃO DO KERBEROS"
+    print_header "🔑 CONFIGURAÇÃO DO KERBEROS"
     
     log_info "Configurando /etc/krb5.conf"
     cat > /etc/krb5.conf << EOF
@@ -440,8 +477,8 @@ configure_kerberos() {
 EOF
     
     mkdir -p /var/log/krb5
-    touch /var/log/krb5/{kdc.log,admin.log,krb5.log}
-    chmod 644 /var/log/krb5/*.log
+    touch /var/log/krb5/{kdc.log,admin.log,krb5.log} 2>/dev/null
+    chmod 644 /var/log/krb5/*.log 2>/dev/null
     
     log_success "Kerberos configurado com realm: $REALM_NAME"
 }
@@ -463,51 +500,76 @@ provision_primary() {
     
     # Remover arquivos conflitantes
     if [ -f /etc/samba/smb.conf ]; then
-        mv /etc/samba/smb.conf "/etc/samba/smb.conf.bak.$(date +%Y%m%d-%H%M%S)"
+        mv /etc/samba/smb.conf "/etc/samba/smb.conf.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null
     fi
     
+    # Parar serviços conflitantes
     systemctl stop smbd nmbd winbind 2>/dev/null
     systemctl disable smbd nmbd winbind 2>/dev/null
     systemctl mask smbd nmbd winbind 2>/dev/null
     
     log_info "Executando provisionamento (pode levar alguns minutos)..."
+    log_info "Por favor, aguarde..."
     
-    if command -v expect &> /dev/null; then
-        expect -c "
-            set timeout 300
-            spawn samba-tool domain provision --use-rfc2307
-            
-            expect \"Realm \\[.*\\]:\" { send \"$REALM_NAME\r\" }
-            expect \"Domain \\[.*\\]:\" { send \"$NETBIOS_NAME\r\" }
-            expect \"Server Role (dc, member, standalone) \\[dc\\]:\" { send \"dc\r\" }
-            expect \"DNS backend (SAMBA_INTERNAL, BIND9_FLATFILE, BIND9_DLZ, NONE) \\[SAMBA_INTERNAL\\]:\" { send \"SAMBA_INTERNAL\r\" }
-            expect \"DNS forwarder .*:\" { send \"$DNS_FORWARDER\r\" }
-            expect \"Administrator password:\" { send \"$ADMIN_PASSWORD\r\" }
-            expect \"Retype password:\" { send \"$ADMIN_PASSWORD\r\" }
-            expect eof
-        "
-    else
-        log_info "Executando provisionamento manual..."
-        samba-tool domain provision --use-rfc2307 --interactive
-    fi
+    # Criar arquivo de resposta para o expect
+    cat > /tmp/provision.expect << EOF
+#!/usr/bin/expect -f
+set timeout 300
+log_user 1
+
+spawn samba-tool domain provision --use-rfc2307
+
+expect "Realm \\\[.*\\\]:"
+send "$REALM_NAME\r"
+
+expect "Domain \\\[.*\\\]:"
+send "$NETBIOS_NAME\r"
+
+expect "Server Role (dc, member, standalone) \\\[dc\\\]:"
+send "dc\r"
+
+expect "DNS backend (SAMBA_INTERNAL, BIND9_FLATFILE, BIND9_DLZ, NONE) \\\[SAMBA_INTERNAL\\\]:"
+send "SAMBA_INTERNAL\r"
+
+expect "DNS forwarder .*:"
+send "$DNS_FORWARDER\r"
+
+expect "Administrator password:"
+send "$ADMIN_PASSWORD\r"
+
+expect "Retype password:"
+send "$ADMIN_PASSWORD\r"
+
+expect eof
+EOF
     
+    chmod +x /tmp/provision.expect
+    
+    # Executar o provisionamento com expect
+    /tmp/provision.expect 2>&1 | tee -a "$LOG_FILE"
+    
+    # Limpar arquivo temporário
+    rm -f /tmp/provision.expect
+    
+    # Verificar se o provisionamento foi bem-sucedido
     if [ -f /var/lib/samba/private/secrets.ldb ]; then
         log_success "Provisionamento concluído com sucesso!"
         
         # Copiar krb5.conf gerado
-        cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
+        cp /var/lib/samba/private/krb5.conf /etc/krb5.conf 2>/dev/null
         
         # Gerar keytab para o administrador
         log_info "Gerando keytab para o administrador..."
-        samba-tool domain exportkeytab /root/adadmin.keytab --principal=administrator@"$REALM_NAME"
-        chmod 600 /root/adadmin.keytab
+        samba-tool domain exportkeytab /root/adadmin.keytab --principal=administrator@"$REALM_NAME" 2>/dev/null
+        chmod 600 /root/adadmin.keytab 2>/dev/null
         
         # Criar pasta de backups
-        mkdir -p /backup/ad
+        mkdir -p /backup/ad 2>/dev/null
         
         log_success "Domínio $DOMAIN_NAME provisionado com sucesso!"
     else
         log_error "Falha no provisionamento!"
+        log_error "Verifique o arquivo de log: $LOG_FILE"
         exit 1
     fi
 }
@@ -530,7 +592,9 @@ start_services() {
         log_success "Serviço samba-ad-dc está rodando!"
         
         log_info "Verificando portas do AD..."
-        ss -tulpn | grep -E "135|139|389|445|464|636|3268|3269|88|53" | grep LISTEN
+        echo ""
+        ss -tulpn 2>/dev/null | grep -E ":(135|139|389|445|464|636|3268|3269|88|53)\s" | grep LISTEN || log_warning "Nenhuma porta AD encontrada"
+        echo ""
     else
         log_error "Falha ao iniciar samba-ad-dc!"
         systemctl status samba-ad-dc --no-pager
@@ -545,39 +609,39 @@ start_services() {
 configure_backup() {
     print_header "💾 CONFIGURANDO BACKUP"
     
-    cat > /usr/local/bin/backup-ad.sh << EOF
+    mkdir -p /backup/ad 2>/dev/null
+    
+    cat > /usr/local/bin/backup-ad.sh << 'EOF'
 #!/bin/bash
 BACKUP_DIR="/backup/ad"
-DATE=\$(date +%Y%m%d_%H%M%S)
+DATE=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="/var/log/backup-ad.log"
 RETENTION_DAYS=30
 
-mkdir -p \$BACKUP_DIR
-echo "=== Backup AD - \$DATE ===" >> \$LOG_FILE
+mkdir -p $BACKUP_DIR
+echo "=== Backup AD - $DATE ===" >> $LOG_FILE
 
 # Backup do banco de dados
-samba-tool domain backup online --server=$FQDN --targetdir=\$BACKUP_DIR --backup-file="ad_backup_\$DATE.bak" -U administrator --password="$ADMIN_PASSWORD" 2>&1 >> \$LOG_FILE
+samba-tool domain backup online --targetdir=$BACKUP_DIR --backup-file="ad_backup_$DATE.bak" 2>&1 >> $LOG_FILE
 
 # Backup do SYSVOL
-tar -czf \$BACKUP_DIR/sysvol_\$DATE.tar.gz -C /var/lib/samba sysvol 2>&1 >> \$LOG_FILE
+tar -czf $BACKUP_DIR/sysvol_$DATE.tar.gz -C /var/lib/samba sysvol 2>&1 >> $LOG_FILE
 
 # Backup das configurações
-tar -czf \$BACKUP_DIR/config_\$DATE.tar.gz -C /etc samba krb5.conf 2>&1 >> \$LOG_FILE
-
-# Backup do keytab
-cp /root/adadmin.keytab \$BACKUP_DIR/adadmin_\$DATE.keytab 2>&1 >> \$LOG_FILE
+tar -czf $BACKUP_DIR/config_$DATE.tar.gz -C /etc samba krb5.conf 2>&1 >> $LOG_FILE
 
 # Limpar backups antigos
-find \$BACKUP_DIR -name "*.bak" -mtime +\$RETENTION_DAYS -delete
-find \$BACKUP_DIR -name "*.tar.gz" -mtime +\$RETENTION_DAYS -delete
-find \$BACKUP_DIR -name "*.keytab" -mtime +\$RETENTION_DAYS -delete
+find $BACKUP_DIR -name "*.bak" -mtime +$RETENTION_DAYS -delete 2>/dev/null
+find $BACKUP_DIR -name "*.tar.gz" -mtime +$RETENTION_DAYS -delete 2>/dev/null
 
-echo "Backup concluído em: \$DATE" >> \$LOG_FILE
-echo "" >> \$LOG_FILE
+echo "Backup concluído em: $DATE" >> $LOG_FILE
+echo "" >> $LOG_FILE
 EOF
     
     chmod +x /usr/local/bin/backup-ad.sh
-    (crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/backup-ad.sh") | crontab -
+    
+    # Adicionar ao crontab
+    (crontab -l 2>/dev/null | grep -v backup-ad.sh; echo "0 2 * * * /usr/local/bin/backup-ad.sh") | crontab -
     
     log_success "Backup configurado! Agendamento diário às 2h."
 }
@@ -601,34 +665,36 @@ fi
 echo ""
 
 echo "2. VERIFICANDO KERBEROS:"
-echo "   Testando autenticação..."
+klist 2>/dev/null || echo "⚠️  Nenhum ticket ativo"
 echo ""
+
 echo "3. VERIFICANDO DNS:"
-host -t SRV _ldap._tcp.$DOMAIN_NAME
-echo ""
+echo "   Registros SRV:"
+host -t SRV _ldap._tcp.$DOMAIN_NAME 2>/dev/null || echo "   ❌ SRV não encontrado"
 echo "   Registros A:"
-host $FQDN
+host $FQDN 2>/dev/null || echo "   ❌ A não encontrado"
 echo ""
 
 echo "4. LISTANDO USUÁRIOS:"
-samba-tool user list | head -5
+samba-tool user list 2>/dev/null | head -5
 echo ""
 
 echo "5. STATUS DE REPLICAÇÃO:"
-samba-tool drs showrepl | head -10
+samba-tool drs showrepl 2>/dev/null | head -10
 echo ""
 
 echo "6. INFORMAÇÕES DO DOMÍNIO:"
-samba-tool domain info 127.0.0.1 | grep -E "Domain|Forest|DNS"
+samba-tool domain info 127.0.0.1 2>/dev/null | grep -E "Domain|Forest|DNS"
 echo ""
 
 echo "7. VERIFICANDO PORTAS:"
-ss -tulpn | grep -E "135|139|389|445|464|636|3268|3269|88|53" | grep LISTEN
+ss -tulpn 2>/dev/null | grep -E ":(135|139|389|445|464|636|3268|3269|88|53)\s" | grep LISTEN || echo "   Nenhuma porta AD encontrada"
 echo ""
 
 echo "=== FIM DOS TESTES ==="
 EOF
     
+    # Substituir variáveis no script
     sed -i "s/\$DOMAIN_NAME/$DOMAIN_NAME/g" /root/test-ad.sh
     sed -i "s/\$FQDN/$FQDN/g" /root/test-ad.sh
     
@@ -670,17 +736,10 @@ show_summary() {
     echo "║ 4. Adicionar usuário:                                          ║"
     echo "║    samba-tool user create usuario senha                        ║"
     echo "║                                                                ║"
-    echo "║ 5. Listar usuários:                                            ║"
-    echo "║    samba-tool user list                                       ║"
-    echo "╚══════════════════════════════════════════════════════════════════╝"
-    
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════════╗"
-    echo "║                 PARA O CONTROLADOR SECUNDÁRIO                   ║"
-    echo "╠══════════════════════════════════════════════════════════════════╣"
-    printf "║ Use o script: setup-ad-secondary.sh                            ║\n"
-    printf "║ IP do DC Primário: %-40s ║\n" "$IP_ADDRESS"
-    printf "║ FQDN do DC Primário: %-36s ║\n" "$FQDN"
+    echo "║ 5. Para o Controlador Secundário:                              ║"
+    echo "║    Use o script: setup-ad-secondary.sh                         ║"
+    echo "║    IP do DC Primário: $IP_ADDRESS                              ║"
+    echo "║    FQDN do DC Primário: $FQDN                                  ║"
     echo "╚══════════════════════════════════════════════════════════════════╝"
     
     echo ""
@@ -701,8 +760,8 @@ main() {
     echo "╔══════════════════════════════════════════════════════════════════╗"
     echo "║                                                                  ║"
     echo "║     🖥️  ACTIVE DIRECTORY - CONTROLADOR PRIMÁRIO                  ║"
-    echo "║     📦 Ubuntu 24.04.4 LTS                                       ║"
-    echo "║     🔧 Versão: 8.0                                              ║"
+    echo "║     📦 Ubuntu 24.04 LTS                                         ║"
+    echo "║     🔧 Versão: 8.1 - CORRIGIDO                                  ║"
     echo "║                                                                  ║"
     echo "║     ✅ Instalação do primeiro DC da floresta                    ║"
     echo "║     ✅ SSH Root habilitado                                      ║"
