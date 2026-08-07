@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # Script: setup-ad-secondary-auto.sh
-# Versão: 1.0 - SEMI-AUTOMÁTICO
+# Versão: 1.1 - CORRIGIDO
 # Descrição: Configuração do Controlador Secundário (join no domínio)
 # Uso: sudo ./setup-ad-secondary-auto.sh
 # =============================================================================
@@ -16,7 +16,7 @@ MAGENTA='\033[0;35m'
 NC='\033[0m'
 BOLD='\033[1m'
 
-# Variáveis (serão preenchidas pelo usuário)
+# Variaveis (serao preenchidas pelo usuario)
 HOSTNAME=""
 DOMAIN_NAME=""
 IP_ADDRESS=""
@@ -25,7 +25,7 @@ DC1_FQDN=""
 ADMIN_PASSWORD=""
 DNS_FORWARDER="8.8.8.8"
 
-# Variáveis automáticas
+# Variaveis automaticas
 REALM_NAME=""
 NETBIOS_NAME=""
 FQDN=""
@@ -34,7 +34,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${SCRIPT_DIR}/setup-ad-secondary-$(date +%Y%m%d-%H%M%S).log"
 
 # =============================================================================
-# FUNÇÕES
+# FUNCOES
 # =============================================================================
 
 log() {
@@ -42,26 +42,26 @@ log() {
 }
 
 log_error() {
-    echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] ❌ ERRO:${NC} $1" | tee -a "$LOG_FILE"
+    echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] ERRO:${NC} $1" | tee -a "$LOG_FILE"
 }
 
 log_warning() {
-    echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] ⚠️  AVISO:${NC} $1" | tee -a "$LOG_FILE"
+    echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] AVISO:${NC} $1" | tee -a "$LOG_FILE"
 }
 
 log_info() {
-    echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')] ℹ️  INFO:${NC} $1" | tee -a "$LOG_FILE"
+    echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')] INFO:${NC} $1" | tee -a "$LOG_FILE"
 }
 
 log_success() {
-    echo -e "${CYAN}[$(date +'%Y-%m-%d %H:%M:%S')] ✅${NC} $1" | tee -a "$LOG_FILE"
+    echo -e "${CYAN}[$(date +'%Y-%m-%d %H:%M:%S')] SUCESSO:${NC} $1" | tee -a "$LOG_FILE"
 }
 
 print_header() {
     echo ""
-    echo "╔══════════════════════════════════════════════════════════════════╗"
-    echo "║  $1"
-    echo "╚══════════════════════════════════════════════════════════════════╝"
+    echo "====================================================================="
+    echo "  $1"
+    echo "====================================================================="
     echo ""
 }
 
@@ -80,141 +80,141 @@ confirm() {
 }
 
 # =============================================================================
-# FUNÇÃO: COLETAR INFORMAÇÕES
+# FUNCAO: COLETAR INFORMACOES
 # =============================================================================
 
 collect_user_info() {
-    print_header "📋 INFORMAÇÕES DE CONFIGURAÇÃO"
+    print_header "INFORMACOES DE CONFIGURACAO"
     
-    echo "Por favor, informe os dados para o Controlador Secundário:"
+    echo "Por favor, informe os dados para o Controlador Secundario:"
     echo ""
     
     # Nome do Servidor
     while true; do
-        read -p "📍 Nome do Servidor (ex: dc02, adserver02): " HOSTNAME
+        read -p "Nome do Servidor (ex: dc02, adserver02): " HOSTNAME
         if [[ -n "$HOSTNAME" ]] && [[ "$HOSTNAME" =~ ^[a-zA-Z0-9-]+$ ]]; then
             break
         else
-            log_error "Nome inválido! Use apenas letras, números e hífen."
+            log_error "Nome invalido! Use apenas letras, numeros e hifen."
         fi
     done
     
-    # Domínio
+    # Dominio
     while true; do
-        read -p "🌐 Nome do Domínio (ex: empresa.local, rnv.intra): " DOMAIN_NAME
+        read -p "Nome do Dominio (ex: empresa.local, rnv.intra): " DOMAIN_NAME
         if [[ -n "$DOMAIN_NAME" ]] && [[ "$DOMAIN_NAME" =~ ^[a-z0-9]+\.[a-z]+$ ]]; then
             break
         else
-            log_error "Domínio inválido! Use formato: empresa.local"
+            log_error "Dominio invalido! Use formato: empresa.local"
         fi
     done
     
     # IP do Servidor
     while true; do
-        read -p "🔢 IP do Servidor (ex: 192.168.1.3): " IP_ADDRESS
+        read -p "IP do Servidor (ex: 192.168.1.3): " IP_ADDRESS
         if [[ -n "$IP_ADDRESS" ]] && [[ "$IP_ADDRESS" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             break
         else
-            log_error "IP inválido! Use formato: 192.168.1.10"
+            log_error "IP invalido! Use formato: 192.168.1.10"
         fi
     done
     
-    # IP do DC Primário
+    # IP do DC Primario
     while true; do
-        read -p "🔗 IP do Controlador Primário (ex: 192.168.1.2): " DC1_IP
+        read -p "IP do Controlador Primario (ex: 192.168.1.2): " DC1_IP
         if [[ -n "$DC1_IP" ]] && [[ "$DC1_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             break
         else
-            log_error "IP inválido! Use formato: 192.168.1.10"
+            log_error "IP invalido! Use formato: 192.168.1.10"
         fi
     done
     
-    # FQDN do DC Primário
+    # FQDN do DC Primario
     while true; do
-        read -p "🔗 FQDN do DC Primário (ex: dc01.empresa.local): " DC1_FQDN
+        read -p "FQDN do DC Primario (ex: dc01.empresa.local): " DC1_FQDN
         if [[ -n "$DC1_FQDN" ]] && [[ "$DC1_FQDN" =~ ^[a-zA-Z0-9.-]+$ ]]; then
             break
         else
-            log_error "FQDN inválido! Use formato: servidor.dominio.local"
+            log_error "FQDN invalido! Use formato: servidor.dominio.local"
         fi
     done
     
     # DNS Forwarder (opcional)
-    read -p "🌐 DNS Forwarder [8.8.8.8]: " DNS_FORWARDER
+    read -p "DNS Forwarder [8.8.8.8]: " DNS_FORWARDER
     DNS_FORWARDER=${DNS_FORWARDER:-8.8.8.8}
     
-    # Calcular valores automáticos
-    REALM_NAME=$(echo "$DOMAIN_NAME | tr '[:lower:]' '[:upper:]')
+    # Calcular valores automaticos
+    REALM_NAME=$(echo "$DOMAIN_NAME" | tr '[:lower:]' '[:upper:]')
     NETBIOS_NAME=$(echo "$DOMAIN_NAME" | cut -d. -f1 | tr '[:lower:]' '[:upper:]')
     FQDN="${HOSTNAME}.${DOMAIN_NAME}"
     
     # Senha do Root
     echo ""
     log_info "Configurando senha do ROOT..."
-    echo "Digite a senha para o usuário root:"
+    echo "Digite a senha para o usuario root:"
     passwd root
     
     # Senha do Administrador do AD
     echo ""
     while true; do
-        read -s -p "🔑 Senha do Administrador do AD (mesma do domínio): " ADMIN_PASSWORD
+        read -s -p "Senha do Administrador do AD (mesma do dominio): " ADMIN_PASSWORD
         echo ""
         if [[ ${#ADMIN_PASSWORD} -ge 8 ]]; then
-            read -s -p "🔑 Confirme a senha: " ADMIN_PASSWORD_CONFIRM
+            read -s -p "Confirme a senha: " ADMIN_PASSWORD_CONFIRM
             echo ""
             if [[ "$ADMIN_PASSWORD" == "$ADMIN_PASSWORD_CONFIRM" ]]; then
                 break
             else
-                log_error "Senhas não coincidem!"
+                log_error "Senhas nao coincidem!"
             fi
         else
-            log_error "Senha muito curta! Mínimo 8 caracteres."
+            log_error "Senha muito curta! Minimo 8 caracteres."
         fi
     done
     
     # Mostrar resumo
     echo ""
-    print_header "📊 RESUMO DA CONFIGURAÇÃO"
+    print_header "RESUMO DA CONFIGURACAO"
     echo ""
-    echo "  ┌──────────────────────────────────────────────────────────────┐"
-    printf "  │ %-22s: %-40s │\n" "Tipo" "Controlador Secundário"
-    printf "  │ %-22s: %-40s │\n" "Servidor" "$HOSTNAME"
-    printf "  │ %-22s: %-40s │\n" "Domínio" "$DOMAIN_NAME"
-    printf "  │ %-22s: %-40s │\n" "Realm" "$REALM_NAME"
-    printf "  │ %-22s: %-40s │\n" "FQDN" "$FQDN"
-    printf "  │ %-22s: %-40s │\n" "IP" "$IP_ADDRESS"
-    printf "  │ %-22s: %-40s │\n" "IP DC Primário" "$DC1_IP"
-    printf "  │ %-22s: %-40s │\n" "FQDN DC Primário" "$DC1_FQDN"
-    printf "  │ %-22s: %-40s │\n" "Usuário AD" "administrator@$REALM_NAME"
-    echo "  └──────────────────────────────────────────────────────────────┘"
+    echo "  --------------------------------------------------------------"
+    printf "  %-22s: %-40s\n" "Tipo" "Controlador Secundario"
+    printf "  %-22s: %-40s\n" "Servidor" "$HOSTNAME"
+    printf "  %-22s: %-40s\n" "Dominio" "$DOMAIN_NAME"
+    printf "  %-22s: %-40s\n" "Realm" "$REALM_NAME"
+    printf "  %-22s: %-40s\n" "FQDN" "$FQDN"
+    printf "  %-22s: %-40s\n" "IP" "$IP_ADDRESS"
+    printf "  %-22s: %-40s\n" "IP DC Primario" "$DC1_IP"
+    printf "  %-22s: %-40s\n" "FQDN DC Primario" "$DC1_FQDN"
+    printf "  %-22s: %-40s\n" "Usuario AD" "administrator@$REALM_NAME"
+    echo "  --------------------------------------------------------------"
     echo ""
     
-    if ! confirm "✅ Confirmar e iniciar configuração?"; then
-        log_info "Configuração cancelada."
+    if ! confirm "Confirmar e iniciar configuracao?"; then
+        log_info "Configuracao cancelada."
         exit 0
     fi
 }
 
 # =============================================================================
-# FUNÇÃO: VERIFICAR CONECTIVIDADE COM DC1
+# FUNCAO: VERIFICAR CONECTIVIDADE COM DC1
 # =============================================================================
 
 check_connectivity() {
-    print_header "🔌 VERIFICANDO CONECTIVIDADE"
+    print_header "VERIFICANDO CONECTIVIDADE"
     
     log_info "Testando ping para DC1 ($DC1_IP)..."
     if ! ping -c 3 $DC1_IP > /dev/null 2>&1; then
-        log_error "❌ DC1 não acessível! Verifique a rede."
+        log_error "DC1 nao acessivel! Verifique a rede."
         exit 1
     fi
-    log_success "✅ DC1 acessível via ping"
+    log_success "DC1 acessivel via ping"
     
     log_info "Testando portas do AD no DC1..."
     for port in 135 139 389 445 464 636 3268 3269 88 53; do
         if nc -zv $DC1_IP $port 2>&1 | grep -q "succeeded"; then
-            log_success "✅ Porta $port está aberta"
+            log_success "Porta $port esta aberta"
         else
-            log_warning "⚠️ Porta $port não está acessível"
+            log_warning "Porta $port nao esta acessivel"
         fi
     done
     
@@ -222,13 +222,13 @@ check_connectivity() {
 }
 
 # =============================================================================
-# FUNÇÃO: CONFIGURAR DNS PARA INTERNET
+# FUNCAO: CONFIGURAR DNS PARA INTERNET
 # =============================================================================
 
 configure_dns_internet() {
-    print_header "🌐 CONFIGURANDO DNS PARA ACESSAR A INTERNET"
+    print_header "CONFIGURANDO DNS PARA ACESSAR A INTERNET"
     
-    log_info "Configurando DNS para acessar os repositórios..."
+    log_info "Configurando DNS para acessar os repositorios..."
     
     chattr -i /etc/resolv.conf 2>/dev/null
     
@@ -241,52 +241,52 @@ EOF
     log_info "Testando conectividade com a internet..."
     
     if ping -c 3 8.8.8.8 > /dev/null 2>&1; then
-        log_success "✅ Conectividade com a internet OK!"
+        log_success "Conectividade com a internet OK!"
     else
-        log_error "❌ Sem conectividade com a internet!"
-        log_info "Verifique sua rede física."
+        log_error "Sem conectividade com a internet!"
+        log_info "Verifique sua rede fisica."
         exit 1
     fi
     
-    log_info "Testando resolução de DNS..."
+    log_info "Testando resolucao de DNS..."
     
     if nslookup google.com 8.8.8.8 > /dev/null 2>&1; then
-        log_success "✅ Resolução de DNS funcionando!"
+        log_success "Resolucao de DNS funcionando!"
     else
-        log_warning "⚠️ Resolução de DNS com problemas"
+        log_warning "Resolucao de DNS com problemas"
         
         if ping -c 3 google.com > /dev/null 2>&1; then
-            log_success "✅ DNS funcionando (ping google.com OK)"
+            log_success "DNS funcionando (ping google.com OK)"
         else
-            log_error "❌ DNS NÃO está funcionando!"
+            log_error "DNS NAO esta funcionando!"
             exit 1
         fi
     fi
     
-    # Testar acesso aos repositórios
-    log_info "Testando acesso aos repositórios Ubuntu..."
+    # Testar acesso aos repositorios
+    log_info "Testando acesso aos repositorios Ubuntu..."
     
     if curl -s --connect-timeout 5 https://br.archive.ubuntu.com > /dev/null 2>&1; then
-        log_success "✅ Acesso ao repositório Ubuntu OK!"
+        log_success "Acesso ao repositorio Ubuntu OK!"
     else
-        log_warning "⚠️ Acesso ao repositório Ubuntu com problemas"
+        log_warning "Acesso ao repositorio Ubuntu com problemas"
         sed -i 's/br.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list
         sed -i 's/security.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list
     fi
 }
 
 # =============================================================================
-# FUNÇÃO: INSTALAR PACOTES
+# FUNCAO: INSTALAR PACOTES
 # =============================================================================
 
 install_packages() {
-    print_header "📦 INSTALAÇÃO DE PACOTES"
+    print_header "INSTALACAO DE PACOTES"
     
-    log_info "Atualizando repositórios..."
+    log_info "Atualizando repositorios..."
     apt update -qq 2>/dev/null
     
     if [ $? -ne 0 ]; then
-        log_warning "Problemas na atualização. Usando mirror alternativo..."
+        log_warning "Problemas na atualizacao. Usando mirror alternativo..."
         sed -i 's/br.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list
         sed -i 's/security.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list
         apt update -qq 2>/dev/null
@@ -295,7 +295,7 @@ install_packages() {
     log_info "Instalando pacotes essenciais..."
     log_info "Isso pode levar alguns minutos..."
     
-    # Configurar respostas automáticas para o Kerberos
+    # Configurar respostas automaticas para o Kerberos
     export DEBIAN_FRONTEND=noninteractive
     
     # Instalar pacotes
@@ -330,19 +330,19 @@ install_packages() {
     
     if command -v samba-tool &> /dev/null; then
         log_success "Samba instalado com sucesso!"
-        log_info "Versão: $(samba-tool --version 2>/dev/null)"
+        log_info "Versao: $(samba-tool --version 2>/dev/null)"
     else
-        log_error "Falha na instalação do Samba!"
+        log_error "Falha na instalacao do Samba!"
         exit 1
     fi
 }
 
 # =============================================================================
-# FUNÇÃO: CONFIGURAR HOSTNAME E DNS
+# FUNCAO: CONFIGURAR HOSTNAME E DNS
 # =============================================================================
 
 configure_hostname_dns() {
-    print_header "🏷️  CONFIGURAÇÃO DE HOSTNAME E DNS"
+    print_header "CONFIGURACAO DE HOSTNAME E DNS"
     
     log_info "Configurando hostname para: $FQDN"
     hostnamectl set-hostname "$FQDN" 2>/dev/null
@@ -374,18 +374,18 @@ EOF
 }
 
 # =============================================================================
-# FUNÇÃO: JUNTAR AO DOMÍNIO (AUTOMÁTICO)
+# FUNCAO: JUNTAR AO DOMINIO (AUTOMATICO)
 # =============================================================================
 
 join_domain() {
-    print_header "🔗 JUNTANDO AO DOMÍNIO (AUTOMÁTICO)"
+    print_header "JUNTANDO AO DOMINIO (AUTOMATICO)"
     
-    log_info "Domínio: $DOMAIN_NAME"
-    log_info "DC Primário: $DC1_FQDN ($DC1_IP)"
+    log_info "Dominio: $DOMAIN_NAME"
+    log_info "DC Primario: $DC1_FQDN ($DC1_IP)"
     
     log_info "Preparando ambiente..."
     
-    # Parar serviços conflitantes
+    # Parar servicos conflitantes
     systemctl stop smbd nmbd winbind 2>/dev/null
     systemctl disable smbd nmbd winbind 2>/dev/null
     systemctl mask smbd nmbd winbind 2>/dev/null
@@ -395,16 +395,16 @@ join_domain() {
         rm -f /etc/samba/smb.conf
     fi
     
-    log_info "Testando autenticação com DC1..."
+    log_info "Testando autenticacao com DC1..."
     echo "$ADMIN_PASSWORD" | kinit administrator@"$REALM_NAME" 2>/dev/null
     
     if [ $? -eq 0 ]; then
-        log_success "✅ Autenticação com DC1 funcionando!"
+        log_success "Autenticacao com DC1 funcionando!"
     else
-        log_warning "⚠️ Falha no teste de autenticação, mas continuando..."
+        log_warning "Falha no teste de autenticacao, mas continuando..."
     fi
     
-    log_info "Realizando join no domínio $DOMAIN_NAME..."
+    log_info "Realizando join no dominio $DOMAIN_NAME..."
     log_info "Isso pode levar alguns minutos..."
     
     # Criar script expect para automatizar o join
@@ -415,12 +415,10 @@ log_user 1
 
 set domain [lindex $argv 0]
 set password [lindex $argv 1]
-set dc_fqdn [lindex $argv 2]
-set dc_ip [lindex $argv 3]
 
 spawn samba-tool domain join $domain DC -U administrator --dns-backend=SAMBA_INTERNAL
 
-expect "Password for \\\[RNV\\administrator\\\]:"
+expect "Password for *:"
 send "$password\r"
 
 expect eof
@@ -428,15 +426,15 @@ EOF
     
     chmod +x /tmp/join.exp
     
-    # Executar join automático
-    /tmp/join.exp "$DOMAIN_NAME" "$ADMIN_PASSWORD" "$DC1_FQDN" "$DC1_IP"
+    # Executar join automatico
+    /tmp/join.exp "$DOMAIN_NAME" "$ADMIN_PASSWORD"
     
     # Limpar
     rm -f /tmp/join.exp
     
     # Verificar
     if [ -f /var/lib/samba/private/secrets.ldb ]; then
-        log_success "✅ Join no domínio concluído com sucesso!"
+        log_success "Join no dominio concluido com sucesso!"
         
         # Copiar krb5.conf gerado
         if [ -f /var/lib/samba/private/krb5.conf ]; then
@@ -449,22 +447,22 @@ EOF
         chmod 600 /root/adadmin.keytab 2>/dev/null
         
     else
-        log_error "❌ Falha no join do domínio!"
+        log_error "Falha no join do dominio!"
         log_info "Verifique:"
-        log_info "  - Se o domínio $DOMAIN_NAME existe"
-        log_info "  - Se a senha está correta"
-        log_info "  - Se o DNS está configurado corretamente"
-        log_info "  - Se as portas do AD estão acessíveis"
+        log_info "  - Se o dominio $DOMAIN_NAME existe"
+        log_info "  - Se a senha esta correta"
+        log_info "  - Se o DNS esta configurado corretamente"
+        log_info "  - Se as portas do AD estao acessiveis"
         exit 1
     fi
 }
 
 # =============================================================================
-# FUNÇÃO: INICIAR SERVIÇOS
+# FUNCAO: INICIAR SERVICOS
 # =============================================================================
 
 start_services() {
-    print_header "🚀 INICIANDO SERVIÇOS"
+    print_header "INICIANDO SERVICOS"
     
     log_info "Iniciando samba-ad-dc..."
     systemctl unmask samba-ad-dc 2>/dev/null
@@ -474,25 +472,25 @@ start_services() {
     sleep 5
     
     if systemctl is-active --quiet samba-ad-dc; then
-        log_success "✅ Serviço samba-ad-dc está rodando!"
+        log_success "Servico samba-ad-dc esta rodando!"
         
         log_info "Verificando portas..."
-        ss -tulpn 2>/dev/null | grep -E ":(135|139|389|445|464|636|3268|3269|88|53)\s" | grep LISTEN || log_warning "Portas não encontradas"
+        ss -tulpn 2>/dev/null | grep -E ":(135|139|389|445|464|636|3268|3269|88|53)\s" | grep LISTEN || log_warning "Portas nao encontradas"
     else
-        log_error "❌ Falha ao iniciar samba-ad-dc!"
+        log_error "Falha ao iniciar samba-ad-dc!"
         systemctl status samba-ad-dc --no-pager
         exit 1
     fi
 }
 
 # =============================================================================
-# FUNÇÃO: VERIFICAR REPLICAÇÃO
+# FUNCAO: VERIFICAR REPLICACAO
 # =============================================================================
 
 check_replication() {
-    print_header "🔄 VERIFICANDO REPLICAÇÃO"
+    print_header "VERIFICANDO REPLICACAO"
     
-    log_info "Verificando status da replicação..."
+    log_info "Verificando status da replicacao..."
     
     # Tentar autenticar
     echo "$ADMIN_PASSWORD" | kinit administrator@"$REALM_NAME" 2>/dev/null
@@ -500,49 +498,49 @@ check_replication() {
     log_info "Executando samba-tool drs showrepl..."
     samba-tool drs showrepl 2>/dev/null | head -20
     
-    log_info "Verificando se o DC secundário está listado..."
+    log_info "Verificando se o DC secundario esta listado..."
     samba-tool domain info $DC1_IP 2>/dev/null | grep -E "Domain|Forest|DNS"
     
-    log_info "Testando resolução de DNS..."
+    log_info "Testando resolucao de DNS..."
     host -t A $FQDN 2>/dev/null
     host -t A $DC1_FQDN 2>/dev/null
     
-    log_success "Verificação de replicação concluída!"
+    log_success "Verificacao de replicacao concluida!"
 }
 
 # =============================================================================
-# FUNÇÃO: CRIAR SCRIPTS AUXILIARES
+# FUNCAO: CRIAR SCRIPTS AUXILIARES
 # =============================================================================
 
 create_aux_scripts() {
-    print_header "📝 CRIANDO SCRIPTS AUXILIARES"
+    print_header "CRIANDO SCRIPTS AUXILIARES"
     
     # Script de teste
     cat > /root/test-ad.sh << EOF
 #!/bin/bash
-echo "=== TESTE DO ACTIVE DIRECTORY (SECUNDÁRIO) ==="
+echo "=== TESTE DO ACTIVE DIRECTORY (SECUNDARIO) ==="
 echo ""
 
-echo "1. VERIFICANDO SERVIÇO:"
+echo "1. VERIFICANDO SERVICO:"
 systemctl status samba-ad-dc --no-pager | grep Active
 echo ""
 
-echo "2. STATUS DE REPLICAÇÃO:"
-echo "   Última replicação:"
+echo "2. STATUS DE REPLICACAO:"
+echo "   Ultima replicacao:"
 samba-tool drs showrepl 2>/dev/null | grep "last success" | head -5
 echo ""
 
-echo "3. VERIFICANDO DOMÍNIO:"
+echo "3. VERIFICANDO DOMINIO:"
 samba-tool domain info 127.0.0.1 2>/dev/null | grep -E "Domain|Forest|DNS"
 echo ""
 
-echo "4. LISTANDO USUÁRIOS (do domínio):"
+echo "4. LISTANDO USUARIOS (do dominio):"
 samba-tool user list 2>/dev/null | head -5
 echo ""
 
-echo "5. VERIFICANDO RESOLUÇÃO DE DNS:"
-host $FQDN 2>/dev/null || echo "   ⚠️  Não resolveu"
-host $DC1_FQDN 2>/dev/null || echo "   ⚠️  Não resolveu"
+echo "5. VERIFICANDO RESOLUCAO DE DNS:"
+host $FQDN 2>/dev/null || echo "   Nao resolveu"
+host $DC1_FQDN 2>/dev/null || echo "   Nao resolveu"
 echo ""
 
 echo "6. VERIFICANDO PORTAS:"
@@ -572,7 +570,7 @@ tar -czf $BACKUP_DIR/sysvol_$DATE.tar.gz -C /var/lib/samba sysvol 2>&1 >> $LOG_F
 find $BACKUP_DIR -name "*.bak" -mtime +30 -delete 2>/dev/null
 find $BACKUP_DIR -name "*.tar.gz" -mtime +30 -delete 2>/dev/null
 
-echo "Backup concluído" >> $LOG_FILE
+echo "Backup concluido" >> $LOG_FILE
 EOF
     
     chmod +x /usr/local/bin/backup-ad.sh
@@ -581,11 +579,11 @@ EOF
 }
 
 # =============================================================================
-# FUNÇÃO: CONFIGURAR SSH ROOT
+# FUNCAO: CONFIGURAR SSH ROOT
 # =============================================================================
 
 configure_ssh_root() {
-    print_header "🔐 CONFIGURANDO ROOT VIA SSH"
+    print_header "CONFIGURANDO ROOT VIA SSH"
     
     log_info "Configurando SSH para permitir login root..."
     cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak 2>/dev/null
@@ -603,11 +601,11 @@ configure_ssh_root() {
 }
 
 # =============================================================================
-# FUNÇÃO: CONFIGURAR AUTO-COMPLETE
+# FUNCAO: CONFIGURAR AUTO-COMPLETE
 # =============================================================================
 
 setup_autocomplete() {
-    print_header "⌨️  CONFIGURANDO AUTO-COMPLETE"
+    print_header "CONFIGURANDO AUTO-COMPLETE"
     
     log_info "Configurando auto-complete..."
     
@@ -651,80 +649,80 @@ EOF
 }
 
 # =============================================================================
-# FUNÇÃO: RESUMO FINAL
+# FUNCAO: RESUMO FINAL
 # =============================================================================
 
 show_summary() {
-    print_header "✅ CONFIGURAÇÃO DO CONTROLADOR SECUNDÁRIO CONCLUÍDA!"
+    print_header "CONFIGURACAO DO CONTROLADOR SECUNDARIO CONCLUIDA!"
     
     echo ""
-    echo "╔══════════════════════════════════════════════════════════════════╗"
-    echo "║              INFORMAÇÕES DO DOMÍNIO                            ║"
-    echo "╠══════════════════════════════════════════════════════════════════╣"
-    printf "║ %-20s: %-40s ║\n" "Função" "Controlador Secundário"
-    printf "║ %-20s: %-40s ║\n" "Domínio" "$DOMAIN_NAME"
-    printf "║ %-20s: %-40s ║\n" "Servidor" "$FQDN"
-    printf "║ %-20s: %-40s ║\n" "IP" "$IP_ADDRESS"
-    printf "║ %-20s: %-40s ║\n" "DC Primário" "$DC1_FQDN ($DC1_IP)"
-    printf "║ %-20s: %-40s ║\n" "Usuário AD" "administrator@$REALM_NAME"
-    echo "╠══════════════════════════════════════════════════════════════════╣"
-    printf "║ %-20s: %-40s ║\n" "Script Teste" "/root/test-ad.sh"
-    printf "║ %-20s: %-40s ║\n" "Script Backup" "/usr/local/bin/backup-ad.sh"
-    echo "╚══════════════════════════════════════════════════════════════════╝"
+    echo "====================================================================="
+    echo "              INFORMACOES DO DOMINIO"
+    echo "====================================================================="
+    printf "  %-20s: %-40s\n" "Funcao" "Controlador Secundario"
+    printf "  %-20s: %-40s\n" "Dominio" "$DOMAIN_NAME"
+    printf "  %-20s: %-40s\n" "Servidor" "$FQDN"
+    printf "  %-20s: %-40s\n" "IP" "$IP_ADDRESS"
+    printf "  %-20s: %-40s\n" "DC Primario" "$DC1_FQDN ($DC1_IP)"
+    printf "  %-20s: %-40s\n" "Usuario AD" "administrator@$REALM_NAME"
+    echo "---------------------------------------------------------------------"
+    printf "  %-20s: %-40s\n" "Script Teste" "/root/test-ad.sh"
+    printf "  %-20s: %-40s\n" "Script Backup" "/usr/local/bin/backup-ad.sh"
+    echo "====================================================================="
     
     echo ""
-    echo "╔══════════════════════════════════════════════════════════════════╗"
-    echo "║                    COMANDOS ÚTEIS                              ║"
-    echo "╠══════════════════════════════════════════════════════════════════╣"
-    echo "║ 1. Verificar serviço:                                          ║"
-    echo "║    systemctl status samba-ad-dc                                ║"
-    echo "║                                                                ║"
-    echo "║ 2. Verificar replicação:                                       ║"
-    echo "║    samba-tool drs showrepl                                    ║"
-    echo "║                                                                ║"
-    echo "║ 3. Executar testes:                                            ║"
-    echo "║    /root/test-ad.sh                                            ║"
-    echo "║                                                                ║"
-    echo "║ 4. Testar autenticação:                                        ║"
-    echo "║    kinit administrator@$REALM_NAME                              ║"
-    echo "║                                                                ║"
-    echo "║ 5. Forçar replicação:                                          ║"
-    echo "║    samba-tool drs replicate $FQDN $DC1_FQDN dc=$DOMAIN_NAME    ║"
-    echo "╚══════════════════════════════════════════════════════════════════╝"
+    echo "====================================================================="
+    echo "                    COMANDOS UTEIS"
+    echo "====================================================================="
+    echo "  1. Verificar servico:"
+    echo "     systemctl status samba-ad-dc"
+    echo ""
+    echo "  2. Verificar replicacao:"
+    echo "     samba-tool drs showrepl"
+    echo ""
+    echo "  3. Executar testes:"
+    echo "     /root/test-ad.sh"
+    echo ""
+    echo "  4. Testar autenticacao:"
+    echo "     kinit administrator@$REALM_NAME"
+    echo ""
+    echo "  5. Forcar replicacao:"
+    echo "     samba-tool drs replicate $FQDN $DC1_FQDN dc=$DOMAIN_NAME"
+    echo "====================================================================="
     
     echo ""
-    log_success "🎉 CONFIGURAÇÃO DO DC SECUNDÁRIO FINALIZADA!"
+    log_success "CONFIGURACAO DO DC SECUNDARIO FINALIZADA!"
 }
 
 # =============================================================================
-# FUNÇÃO PRINCIPAL
+# FUNCAO PRINCIPAL
 # =============================================================================
 
 main() {
     check_root
     
     clear
-    echo "╔══════════════════════════════════════════════════════════════════╗"
-    echo "║                                                                  ║"
-    echo "║     🖥️  ACTIVE DIRECTORY - CONTROLADOR SECUNDÁRIO                ║"
-    echo "║     📦 Ubuntu 24.04 LTS                                         ║"
-    echo "║     🔧 Versão: 1.0 - SEMI-AUTOMÁTICO                            ║"
-    echo "║                                                                  ║"
-    echo "║     ✅ Adiciona DC secundário ao domínio                        ║"
-    echo "║     ✅ Pergunta apenas o essencial                              ║"
-    echo "║     ✅ Join automático no domínio                               ║"
-    echo "║     ✅ SSH Root habilitado                                      ║"
-    echo "║                                                                  ║"
-    echo "╚══════════════════════════════════════════════════════════════════╝"
+    echo "====================================================================="
+    echo "                                                                     "
+    echo "     ACTIVE DIRECTORY - CONTROLADOR SECUNDARIO                      "
+    echo "     Ubuntu 24.04 LTS                                               "
+    echo "     Versao: 1.1 - CORRIGIDO                                        "
+    echo "                                                                     "
+    echo "     Adiciona DC secundario ao dominio                              "
+    echo "     Pergunta apenas o essencial                                    "
+    echo "     Join automatico no dominio                                     "
+    echo "     SSH Root habilitado                                            "
+    echo "                                                                     "
+    echo "====================================================================="
     echo ""
     
     # Etapa 1: Configurar DNS para internet
     configure_dns_internet
     
-    # Coletar informações
+    # Coletar informacoes
     collect_user_info
     
-    log_info "Início: $(date)"
+    log_info "Inicio: $(date)"
     log_info "Log: $LOG_FILE"
     echo ""
     
@@ -742,7 +740,7 @@ main() {
     # Resumo final
     show_summary
     
-    if confirm "🔄 Deseja reiniciar o servidor agora?"; then
+    if confirm "Deseja reiniciar o servidor agora?"; then
         log_info "Reiniciando em 5 segundos..."
         sleep 5
         reboot
